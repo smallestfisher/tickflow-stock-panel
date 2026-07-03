@@ -76,3 +76,66 @@ def test_get_instruments_pagination():
     items = client.exchanges.get_instruments("SH", instrument_type="stock")
     assert len(items) == 101
     assert items[-1]["symbol"] == "600100.SH"
+
+
+def _em_kline_transport(klines_by_secid):
+    """klines_by_secid: {"1.600000": ["2026-07-01,9.3,9.4,9.5,9.2,1000,9300.0,1.5"]}"""
+
+    def handler(request: httpx.Request):
+        secid = request.url.params.get("secid")
+        body = {"data": {"code": secid.split(".")[-1] if secid else "",
+                         "klines": klines_by_secid.get(secid, [])}}
+        return httpx.Response(200, json={"rc": 0, "data": body.get("data")})
+
+    return httpx.MockTransport(handler)
+
+
+def test_klines_batch_daily_as_dataframe_true():
+    transport = _em_kline_transport({"1.600000": [
+        "2026-07-01,9.30,9.40,9.50,9.20,1000,9300.00,1.50",
+        "2026-07-02,9.40,9.45,9.60,9.35,1200,11220.00,0.53",
+    ]})
+    client = FreeSourceClient(transport=transport)
+    raw = client.klines.batch(["600000.SH"], period="1d", count=2,
+                              adjust="qfq", as_dataframe=True)
+    assert isinstance(raw, dict)
+    df = raw["600000.SH"]
+    assert list(df.columns) == ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+    assert len(df) == 2
+    assert float(df.iloc[0]["close"]) == 9.40
+
+
+def test_klines_batch_daily_as_dataframe_false():
+    transport = _em_kline_transport({"1.600000": ["2026-07-01,9.30,9.40,9.50,9.20,1000,9300.00,1.50"]})
+    client = FreeSourceClient(transport=transport)
+    raw = client.klines.batch(["600000.SH"], period="1d", count=1, as_dataframe=False)
+    assert isinstance(raw, dict)
+    rec = raw["600000.SH"][0]
+    assert rec["date"] == "2026-07-01"
+    assert rec["close"] == 9.40
+
+
+def test_klines_get_single():
+    transport = _em_kline_transport({"1.600000": ["2026-07-01,9.30,9.40,9.50,9.20,1000,9300.00,1.50"]})
+    client = FreeSourceClient(transport=transport)
+    recs = client.klines.get("600000.SH", period="1d", count=1, as_dataframe=False)
+    assert recs and recs[0]["symbol"] == "600000.SH"
+
+
+def test_klines_batch_minute_klt():
+    transport = _em_kline_transport({"1.600000": ["2026-07-03 09:35,8.69,8.76,8.78,8.66,57973,50589982.00"]})
+    client = FreeSourceClient(transport=transport)
+    raw = client.klines.batch(["600000.SH"], period="1m", count=1, as_dataframe=False)
+    rec = raw["600000.SH"][0]
+    assert rec["date"] == "2026-07-03 09:35"
+    assert rec["close"] == 8.76
+
+
+def test_klines_batch_failure_isolated():
+    """单只失败不影响其他标的(返回空 df/list,不抛)。"""
+    transport = _em_kline_transport({"1.600000": ["2026-07-01,9.30,9.40,9.50,9.20,1000,9300.00,1.50"]})
+    client = FreeSourceClient(transport=transport)
+    # 000001.SZ → 0.000001 不在 transport,但应被 try 包住返回空
+    raw = client.klines.batch(["600000.SH", "000001.SZ"], period="1d", count=1, as_dataframe=False)
+    assert "600000.SH" in raw and raw["600000.SH"]
+    assert "000001.SZ" in raw and raw["000001.SZ"] == []

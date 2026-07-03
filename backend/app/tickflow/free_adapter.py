@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 import httpx
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -124,13 +125,69 @@ class _Klines:
     def __init__(self, client: FreeSourceClient):
         self._c = client
 
+    @staticmethod
+    def _parse_em_klines(klines: list[str], symbol: str) -> list[dict]:
+        """东财 klines 字符串: "date,open,close,high,low,volume,amount,change_pct"。"""
+        rows = []
+        for s in klines or []:
+            parts = s.split(",")
+            if len(parts) < 7:
+                continue
+            rows.append({
+                "symbol": symbol,
+                "date": parts[0],
+                "open": float(parts[1]),
+                "close": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "volume": float(parts[5]),
+                "amount": float(parts[6]),
+            })
+        return rows
+
+    def _fetch_one(self, symbol, klt, count, adjust):
+        secid = _symbol_to_secid(symbol)
+        # fqt: 0=不复权 1=前复权 2=后复权
+        fqt = {"none": 0, "qfq": 1, "hfq": 2, "front": 1, "back": 2}.get(adjust, 1)
+        beg = "19900101"
+        end = "20990101"
+        r = _http_get(self._c._http,
+                      "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                      referer=EM_REFERER,
+                      secid=secid,
+                      fields1="f1,f2,f3,f4,f5,f6",
+                      fields2="f51,f52,f53,f54,f55,f56,f57,f58",
+                      klt=klt, fqt=fqt, beg=beg, end=end, lmt=count or 10000)
+        try:
+            klines = (r.json().get("data") or {}).get("klines") or []
+        except Exception:
+            klines = []
+        return self._parse_em_klines(klines, symbol)
+
     def batch(self, symbols, period="1d", count=250, adjust="none",
               start_time=None, end_time=None, as_dataframe=True, show_progress=False):
-        raise NotImplementedError
+        # period: "1d" → klt=101; "1m" → klt=1; "5m" → klt=5
+        klt = {"1d": 101, "1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60}.get(period, 101)
+        out: dict = {}
+        for i, sym in enumerate(symbols):
+            if i > 0:
+                time.sleep(0.05)  # 自我节流
+            try:
+                rows = self._fetch_one(sym, klt, count, adjust)
+            except Exception as e:
+                logger.warning("free klines %s failed: %s", sym, e)
+                rows = []
+            if as_dataframe:
+                cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+                out[sym] = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame()
+            else:
+                out[sym] = rows
+        return out
 
     def get(self, symbol, period="1d", count=250, adjust="none",
             start_time=None, end_time=None, as_dataframe=False, show_progress=False):
-        raise NotImplementedError
+        d = self.batch([symbol], period=period, count=count, adjust=adjust, as_dataframe=as_dataframe)
+        return d.get(symbol)
 
     def ex_factors(self, symbols, as_dataframe=False, batch_size=None, show_progress=False,
                    start_time=None, end_time=None):
