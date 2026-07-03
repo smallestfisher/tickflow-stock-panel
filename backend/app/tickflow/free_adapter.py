@@ -93,8 +93,16 @@ def _sina_timestamp(parts, date_idx, time_idx) -> int | None:
 
 
 def _is_transient(e: Exception) -> bool:
-    """与 policy._is_transient 同语义:5xx/429/超时/连接为瞬时。"""
-    status = getattr(e, "status_code", None)
+    """与 policy._is_transient 同语义:5xx/429/超时/连接为瞬时。
+
+    httpx.HTTPStatusError 的状态码在 e.response.status_code(它本身无 status_code 属性),
+    直接读 e 上的 status_code 恒为 None —— 这会让 _http_get 主动抛出的 5xx 被判成
+    "非瞬时"而不重试。故这里同时兼容 response.status_code 与直接属性两种来源。
+    """
+    resp = getattr(e, "response", None)
+    status = getattr(resp, "status_code", None)
+    if status is None:
+        status = getattr(e, "status_code", None)
     if isinstance(status, int) and (status == 429 or status >= 500):
         return True
     return isinstance(e, (httpx.TimeoutException, httpx.TransportError))
@@ -148,7 +156,16 @@ class _Klines:
     def _fetch_one(self, symbol, klt, count, adjust):
         secid = _symbol_to_secid(symbol)
         # fqt: 0=不复权 1=前复权 2=后复权
-        fqt = {"none": 0, "qfq": 1, "hfq": 2, "front": 1, "back": 2}.get(adjust, 1)
+        # 关键(免费源复权语义):本 adapter 的 ex_factors() 恒返回空 dict,
+        # pipeline 的 _apply_adj_factor 遇空因子会原样返回 raw、不再复权。
+        # 因此【日K】必须由东财服务端直接返回前复权价(fqt=1),否则 enriched 里
+        # 标注"前复权"的 open/high/low/close 会是未复权原始价(除权跳空缺口未消除)。
+        # 上游 kline_sync.sync_daily_batch 写死 adjust="none",这里对日K忽略该值强制 qfq。
+        # 【分钟K】下游明确只存 raw、不复权(见 sync_and_persist_minute 注释),保持 fqt=0。
+        if klt == 101:  # 日K:强制前复权
+            fqt = 1
+        else:           # 分钟K/其他:按 adjust 映射,默认不复权
+            fqt = {"none": 0, "qfq": 1, "hfq": 2, "front": 1, "back": 2}.get(adjust, 0)
         beg = "19900101"
         end = "20990101"
         r = _http_get(self._c._http,
@@ -478,9 +495,14 @@ class _Financials:
                 rows = (r.json().get("result") or {}).get("data") or []
             except Exception:
                 rows = []
-            # 给每条补 symbol(financial_sync 期待 record["symbol"] 存在)
+            # 给每条补 symbol(financial_sync 期待 record["symbol"] 存在);
+            # 东财报告期字段 REPORT_DATE → period_end(financial_analyzer 排序/摘要依赖)。
             for rec in rows:
                 rec["symbol"] = sym
+                if "period_end" not in rec:
+                    rd = rec.get("REPORT_DATE")
+                    if rd:
+                        rec["period_end"] = str(rd)[:10]
             out[sym] = rows
         return out
 
@@ -516,7 +538,10 @@ class _Exchanges:
         fs = fs_map.get((ex, instrument_type))
         if fs is None:
             return []
-        fields = "f12,f13,f14,f3,f6"  # code, market, name, change_pct, amount
+        # f12 代码 f13 市场 f14 名 f38 总股本 f39 流通股本
+        # (total_shares/float_shares 供 strategy 市值过滤 close*total_shares;
+        #  listing_date/limit_up clist 不提供,置 None,下游按缺省处理)
+        fields = "f12,f13,f14,f38,f39"
         out: list[dict] = []
         pn = 1
         pz = 100
@@ -550,7 +575,14 @@ class _Exchanges:
                     "exchange": sym_ex,
                     "region": "CN",
                     "type": instrument_type,
-                    "ext": {},
+                    "ext": {
+                        "total_shares": _f(d, "f38"),
+                        "float_shares": _f(d, "f39"),
+                        "listing_date": None,
+                        "tick_size": None,
+                        "limit_up": None,
+                        "limit_down": None,
+                    },
                 })
             if len(diff) < pz:
                 break

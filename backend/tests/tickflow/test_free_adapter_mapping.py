@@ -1,11 +1,11 @@
+import httpx
+
 from app.tickflow.free_adapter import (
     FreeSourceClient,
     _secid_to_symbol,
     _sina_symbols_param,
     _symbol_to_secid,
 )
-
-import httpx
 
 
 def test_symbol_to_secid_sh():
@@ -49,7 +49,8 @@ def _em_clist_transport(rows, total=None):
 
 def test_get_instruments_stock():
     rows = [
-        {"f12": "600000", "f13": 1, "f14": "浦发银行", "f6": 100000.0, "f3": 1.5},
+        {"f12": "600000", "f13": 1, "f14": "浦发银行", "f6": 100000.0, "f3": 1.5,
+         "f38": 29352000000.0, "f39": 29352000000.0},
     ]
     client = FreeSourceClient(transport=_em_clist_transport(rows, total=1))
     items = client.exchanges.get_instruments("SH", instrument_type="stock")
@@ -58,7 +59,9 @@ def test_get_instruments_stock():
     assert items[0]["code"] == "600000"
     assert items[0]["exchange"] == "SH"
     assert items[0]["type"] == "stock"
-    assert "ext" in items[0]
+    # Fix 2: ext 需带总股本/流通股本(instrument_sync._flatten_instruments 读它算市值)
+    assert items[0]["ext"]["total_shares"] == 29352000000.0
+    assert items[0]["ext"]["float_shares"] == 29352000000.0
 
 
 def test_get_instruments_pagination():
@@ -137,8 +140,45 @@ def test_klines_batch_failure_isolated():
     client = FreeSourceClient(transport=transport)
     # 000001.SZ → 0.000001 不在 transport,但应被 try 包住返回空
     raw = client.klines.batch(["600000.SH", "000001.SZ"], period="1d", count=1, as_dataframe=False)
-    assert "600000.SH" in raw and raw["600000.SH"]
+    assert raw.get("600000.SH")
     assert "000001.SZ" in raw and raw["000001.SZ"] == []
+
+
+def test_daily_forces_qfq_minute_stays_raw():
+    """Fix 1: ex_factors 返回空,pipeline 不再复权,故日K必须直接返回前复权价(fqt=1);
+    分钟K下游要 raw,保持 fqt=0。"""
+    seen: list[tuple[str, str]] = []  # (klt, fqt)
+
+    def handler(request: httpx.Request):
+        seen.append((request.url.params.get("klt"), request.url.params.get("fqt")))
+        return httpx.Response(200, json={"rc": 0, "data": {"code": "600000", "klines": []}})
+
+    client = FreeSourceClient(transport=httpx.MockTransport(handler))
+    # 日K 即使 adjust="none" 也应 fqt=1
+    client.klines.batch(["600000.SH"], period="1d", count=1, adjust="none", as_dataframe=False)
+    assert ("101", "1") in seen
+    seen.clear()
+    # 分钟K fqt=0
+    client.klines.batch(["600000.SH"], period="1m", count=1, as_dataframe=False)
+    assert ("1", "0") in seen
+
+
+def test_ex_factors_returns_empty():
+    """公开源无原始复权因子,ex_factors 返回空 dict(日K已是前复权价)。"""
+    client = FreeSourceClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    assert client.klines.ex_factors(["600000.SH"]) == {}
+
+
+def test_is_transient_5xx_retries():
+    """Fix 4: 5xx 应被判为瞬时错误并重试(而非立即抛)。"""
+    from app.tickflow.free_adapter import _is_transient
+    resp = httpx.Response(503, request=httpx.Request("GET", "http://x"))
+    err = httpx.HTTPStatusError("503", request=resp.request, response=resp)
+    assert _is_transient(err) is True
+    resp404 = httpx.Response(404, request=httpx.Request("GET", "http://x"))
+    err404 = httpx.HTTPStatusError("404", request=resp404.request, response=resp404)
+    assert _is_transient(err404) is False
 
 
 def _tx_minute_transport(data_by_code):
@@ -254,3 +294,36 @@ def test_financials_metrics():
     rec = data["600000.SH"][0]
     assert rec["SECURITY_CODE"] == "600000"
     assert rec["symbol"] == "600000.SH"  # financial_sync 期待 record 上有 symbol
+    # Fix 3: financial_analyzer 按 period_end 排序 + 摘要,东财 REPORT_DATE 映射为 period_end
+    assert rec["period_end"] == "2026-03-31"
+
+
+# ---- Fix 4: 5xx 重试(_is_transient 正确识别 HTTPStatusError)----
+
+def test_is_transient_5xx_httpstatuserror():
+    from app.tickflow.free_adapter import _is_transient
+    req = httpx.Request("GET", "http://x")
+    resp = httpx.Response(503, request=req)
+    err = httpx.HTTPStatusError("503", request=req, response=resp)
+    assert _is_transient(err) is True
+    # 4xx 不是瞬时
+    resp4 = httpx.Response(403, request=req)
+    err4 = httpx.HTTPStatusError("403", request=req, response=resp4)
+    assert _is_transient(err4) is False
+
+
+def test_http_get_retries_5xx_then_succeeds():
+    """首次 500 → 重试后 200。验证 _http_get 真的重试了 5xx。"""
+    from app.tickflow.free_adapter import _http_get
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, json={"ok": True})
+
+    client = FreeSourceClient(transport=httpx.MockTransport(handler))
+    r = _http_get(client._http, "https://push2.eastmoney.com/x")
+    assert r.status_code == 200
+    assert calls["n"] == 2  # 第一次 500,第二次成功
