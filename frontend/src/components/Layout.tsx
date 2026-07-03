@@ -44,6 +44,8 @@ import {
   BookOpenCheck,
   ExternalLink,
   X,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -299,6 +301,17 @@ export function Layout() {
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
+  // 侧边栏折叠: 收窄成图标条, 状态持久化到 localStorage
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('sidebar_collapsed') === '1' } catch { return false }
+  })
+  const toggleCollapsed = () => {
+    setCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem('sidebar_collapsed', next ? '1' : '0') } catch { /* ignore */ }
+      return next
+    })
+  }
   const indicesPinned = prefs?.indices_nav_pinned ?? true
   const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? CORE_INDEXES.map(p => p.symbol)
   const sidebarIndexes = CORE_INDEXES.filter(item => sidebarIndexSymbols.includes(item.symbol))
@@ -380,42 +393,74 @@ export function Layout() {
   }
 
   return (
-    <div className="h-screen grid grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
+    <div
+      className={cn(
+        'h-screen grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth',
+        collapsed ? 'grid-cols-[3.5rem_1fr]' : 'grid-cols-[14rem_1fr]',
+      )}
+    >
       <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">
-        <div className="px-5 py-5 border-b border-border shrink-0">
-          {/* Brand block — 原创 logo + 等宽 wordmark */}
-          <div className="flex items-center gap-2.5">
-            <Logo
-              size={28}
-              className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
-              style={{ color: BRAND }}
-            />
-            <div
-              className="font-mono font-bold text-[13px] tracking-[0.06em] text-foreground leading-tight"
-              style={{ textShadow: `0 0 10px ${BRAND}44` }}
-            >
-              <div>TickFlow</div>
-              <div>Stock Panel</div>
+        <div className={cn('border-b border-border shrink-0', collapsed ? 'px-2 py-3' : 'px-5 py-5')}>
+          {collapsed ? (
+            /* 折叠态: 仅 logo + 展开按钮, 纵向排列 */
+            <div className="flex flex-col items-center gap-2">
+              <Logo
+                size={26}
+                className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
+                style={{ color: BRAND }}
+              />
+              <button
+                onClick={toggleCollapsed}
+                className="flex h-7 w-7 items-center justify-center rounded-btn text-foreground/70 hover:bg-elevated hover:text-foreground transition-colors"
+                title="展开侧边栏"
+              >
+                <PanelLeftOpen className="h-4 w-4" />
+              </button>
             </div>
-          </div>
+          ) : (
+            <>
+              {/* Brand block — 原创 logo + 等宽 wordmark */}
+              <div className="flex items-center gap-2.5">
+                <Logo
+                  size={28}
+                  className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
+                  style={{ color: BRAND }}
+                />
+                <div
+                  className="font-mono font-bold text-[13px] tracking-[0.06em] text-foreground leading-tight"
+                  style={{ textShadow: `0 0 10px ${BRAND}44` }}
+                >
+                  <div>TickFlow</div>
+                  <div>Stock Panel</div>
+                </div>
+                <button
+                  onClick={toggleCollapsed}
+                  className="ml-auto flex h-7 w-7 items-center justify-center rounded-btn text-foreground/60 hover:bg-elevated hover:text-foreground transition-colors shrink-0"
+                  title="折叠侧边栏"
+                >
+                  <PanelLeftClose className="h-4 w-4" />
+                </button>
+              </div>
 
-          <div className="mt-2.5 text-[10px] uppercase tracking-[0.22em] text-secondary">
-            Quant · Terminal
-          </div>
+              <div className="mt-2.5 text-[10px] uppercase tracking-[0.22em] text-secondary">
+                Quant · Terminal
+              </div>
 
-          <div
-            className="mt-3 h-px"
-            style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
-          />
+              <div
+                className="mt-3 h-px"
+                style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
+              />
 
-          <TierBadge
-            label={caps?.label ?? ''}
-            hasKey={settingsState?.mode !== 'none'}
-          />
-          <AIConfigBadge
-            configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
-            model={settingsState?.ai_model}
-          />
+              <TierBadge
+                label={caps?.label ?? ''}
+                hasKey={settingsState?.mode !== 'none'}
+              />
+              <AIConfigBadge
+                configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
+                model={settingsState?.ai_model}
+              />
+            </>
+          )}
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
@@ -423,9 +468,11 @@ export function Layout() {
             <NavLink
               key={to}
               to={to}
+              title={collapsed ? label : undefined}
               className={({ isActive }) =>
                 cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                  'relative flex items-center gap-3 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                  collapsed ? 'justify-center px-0 py-2' : 'px-3 py-2',
                   isActive
                     ? 'bg-elevated text-foreground font-medium'
                     : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
@@ -435,29 +482,54 @@ export function Layout() {
               {({ isActive }) => (
                 <>
                   <Icon className="h-4 w-4 shrink-0" />
-                  <span className="flex-1">{label}</span>
+                  {!collapsed && <span className="flex-1">{label}</span>}
                   {/* 个股分析 Beta 标识 */}
-                  {(to === '/stock-analysis' || to === '/review') && (
+                  {!collapsed && (to === '/stock-analysis' || to === '/review') && (
                     <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
                       Beta
                     </span>
                   )}
                   {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                  {to === '/data' && isDataSyncing && (
+                  {!collapsed && to === '/data' && isDataSyncing && (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
                   )}
-                  {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                  {!collapsed && to === '/data' && !isDataSyncing && dataSyncJustDone && (
                     <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
                   )}
                   {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                  {to === '/monitor' && <MonitorBadge active={isActive} />}
+                  {!collapsed && to === '/monitor' && <MonitorBadge active={isActive} />}
+                  {/* 折叠态: 数据同步中 / 有未读告警时, 用右上角小圆点提示 */}
+                  {collapsed && to === '/data' && isDataSyncing && (
+                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
+                  )}
                 </>
               )}
             </NavLink>
           ))}
         </nav>
 
-        {/* 全局行情开关 */}
+        {/* 全局行情开关 — 折叠态: 仅一个状态图标, 点击展开侧栏 */}
+        {collapsed ? (
+          <div className="border-t border-border px-2 py-2.5 shrink-0 flex justify-center">
+            <button
+              onClick={toggleCollapsed}
+              className="relative flex h-8 w-8 items-center justify-center rounded-btn text-foreground/70 hover:bg-elevated hover:text-foreground transition-colors"
+              title={isNoneTier ? '实时行情 (需 Free+)' : `实时行情 · ${realtimeModeLabel}${realtimeEnabled ? ' · 已开启' : ' · 已关闭'}`}
+            >
+              <RadioTower className="h-4 w-4" />
+              {!isNoneTier && (
+                <span className={cn(
+                  'absolute right-1 top-1 h-1.5 w-1.5 rounded-full',
+                  realtimeEnabled && isRunning && isTrading
+                    ? 'bg-accent animate-pulse'
+                    : realtimeEnabled
+                      ? 'bg-warning/60'
+                      : 'bg-muted',
+                )} />
+              )}
+            </button>
+          </div>
+        ) : (
         <div className="border-t border-border px-3 py-2.5 shrink-0">
           {isNoneTier ? (
             <div>
@@ -545,26 +617,35 @@ export function Layout() {
             <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
           )}
         </div>
+        )}
 
         <div className="border-t border-border px-2 py-3 space-y-0.5 shrink-0">
           <NavLink
             to="/settings"
+            title={collapsed ? `设置${version ? ` · ${version}` : ''}` : undefined}
             className={({ isActive }) =>
               cn(
-                'flex items-center justify-between gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                'flex items-center gap-3 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                collapsed ? 'justify-center px-0 py-2' : 'justify-between px-3 py-2',
                 isActive
                   ? 'bg-elevated text-foreground font-medium'
                   : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
               )
             }
           >
-            <span className="flex items-center gap-3">
+            {collapsed ? (
               <Settings className="h-4 w-4 shrink-0" />
-              <span>设置</span>
-            </span>
-            <span className="font-mono text-[10px] text-muted/50 select-none">
-              {version ?? ''}
-            </span>
+            ) : (
+              <>
+                <span className="flex items-center gap-3">
+                  <Settings className="h-4 w-4 shrink-0" />
+                  <span>设置</span>
+                </span>
+                <span className="font-mono text-[10px] text-muted/50 select-none">
+                  {version ?? ''}
+                </span>
+              </>
+            )}
           </NavLink>
         </div>
       </aside>
