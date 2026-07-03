@@ -61,6 +61,7 @@ def get_settings() -> dict:
         "mode": tf_client.current_mode(),
         "tickflow_api_key_masked": secrets_store.mask(key),
         "has_tickflow_key": bool(key),
+        "data_backend": secrets_store.get_data_backend(),
         "tier_label": tier_label(),
         "current_endpoint": tf_client.current_endpoint(),
         "probe_log": probe_log(),
@@ -213,6 +214,33 @@ def clear_tickflow_key(request: Request) -> dict:
         "tier_label": tier_label(),
         "current_endpoint": tf_client.current_endpoint(),
         "capabilities_count": len(capset.all()),
+    }
+
+
+class DataBackendIn(BaseModel):
+    backend: str  # "tickflow" / "free_source"
+
+
+@router.post("/data-backend")
+def set_data_backend(request: Request, req: DataBackendIn) -> dict:
+    """切换数据后端: tickflow(默认) / free_source(免费公开源 adapter)。
+
+    切换后重置客户端 + 强制重新探测能力, 并同步给 app.state / 财务调度器。
+    """
+    try:
+        secrets_store.set_data_backend(req.backend)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    tf_client.reset_clients()
+    capset = detect_capabilities(force=True)
+    request.app.state.capabilities = capset
+    _sync_financial_scheduler_caps(request.app.state, capset)
+    return {
+        "data_backend": secrets_store.get_data_backend(),
+        "mode": tf_client.current_mode(),
+        "tier_label": tier_label(),
+        "current_endpoint": tf_client.current_endpoint(),
+        "capabilities": capset.to_dict(),
     }
 
 
