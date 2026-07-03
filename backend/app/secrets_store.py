@@ -94,3 +94,19 @@ def mask(key: str, prefix: int = 4, suffix: int = 4) -> str:
     if len(key) <= prefix + suffix:
         return "•" * len(key)
     return f"{key[:prefix]}{'•' * 6}{key[-suffix:]}"
+
+
+_VALID_BACKENDS = ("tickflow", "free_source")
+
+
+def get_data_backend() -> str:
+    """数据后端: "tickflow"(默认) / "free_source"(免费公开源 adapter)。"""
+    return load().get("data_backend") or "tickflow"
+
+
+def set_data_backend(backend: str) -> str:
+    """持久化数据后端选择。非法值抛 ValueError。"""
+    if backend not in _VALID_BACKENDS:
+        raise ValueError(f"invalid data_backend: {backend}; expected one of {_VALID_BACKENDS}")
+    save({"data_backend": backend})
+    return backend
