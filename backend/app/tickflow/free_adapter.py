@@ -193,11 +193,44 @@ class _Klines:
                    start_time=None, end_time=None):
         return {}  # 公开源直接返回前复权价,无原始因子;空 dict 让 _normalize_adj_factor 自然跳过
 
+    @staticmethod
+    def _parse_tx_minute(arr: list[str], symbol: str) -> list[dict]:
+        """腾讯分时: "0930 8.69 4253 3695857.00" → time/price/volume/amount。"""
+        rows = []
+        for s in arr or []:
+            parts = s.split(" ")
+            if len(parts) < 4:
+                continue
+            rows.append({
+                "symbol": symbol,
+                "time": parts[0],
+                "price": float(parts[1]),
+                "volume": float(parts[2]),
+                "amount": float(parts[3]),
+            })
+        return rows
+
     def intraday(self, symbol, count=None, as_dataframe=False):
-        raise NotImplementedError
+        sina = _sina_symbol(symbol)
+        r = _http_get(self._c._http,
+                      "https://web.ifzq.gtimg.cn/appstock/app/minute/query",
+                      referer="https://gu.qq.com/", code=sina)
+        try:
+            arr = (((r.json().get("data") or {}).get(sina) or {}).get("data") or {}).get("data") or []
+        except Exception:
+            arr = []
+        rows = self._parse_tx_minute(arr, symbol)
+        if count:
+            rows = rows[-count:]
+        return rows
 
     def intraday_batch(self, symbols, count=None, as_dataframe=False):
-        raise NotImplementedError
+        out: dict = {}
+        for i, sym in enumerate(symbols):
+            if i > 0:
+                time.sleep(0.05)
+            out[sym] = self.intraday(sym, count=count, as_dataframe=False)
+        return out
 
 
 class _Quotes:

@@ -139,3 +139,30 @@ def test_klines_batch_failure_isolated():
     raw = client.klines.batch(["600000.SH", "000001.SZ"], period="1d", count=1, as_dataframe=False)
     assert "600000.SH" in raw and raw["600000.SH"]
     assert "000001.SZ" in raw and raw["000001.SZ"] == []
+
+
+def _tx_minute_transport(data_by_code):
+    """data_by_code: {"sh600000": ["0930 8.69 4253 3695857.00", ...]}"""
+
+    def handler(request: httpx.Request):
+        code = request.url.params.get("code")
+        arr = data_by_code.get(code, [])
+        return httpx.Response(200, json={"code": 0, "data": {code: {"data": {"data": arr}}}})
+
+    return httpx.MockTransport(handler)
+
+
+def test_intraday_single():
+    transport = _tx_minute_transport({"sh600000": ["0930 8.69 4253 3695857.00", "0931 8.71 20774 18047793.00"]})
+    client = FreeSourceClient(transport=transport)
+    recs = client.klines.intraday("600000.SH", as_dataframe=False)
+    assert recs and recs[0]["price"] == 8.69
+    assert recs[1]["time"] == "0931"
+
+
+def test_intraday_count_tail():
+    transport = _tx_minute_transport({"sh600000": ["0930 8.69 4253 3695857.00", "0931 8.71 20774 18047793.00", "0932 8.74 31355 27272090.19"]})
+    client = FreeSourceClient(transport=transport)
+    recs = client.klines.intraday("600000.SH", count=2, as_dataframe=False)
+    assert len(recs) == 2
+    assert recs[-1]["time"] == "0932"
