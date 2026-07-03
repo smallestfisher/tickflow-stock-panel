@@ -10,11 +10,10 @@
 """
 from __future__ import annotations
 
-import os
-
 from tickflow import AsyncTickFlow, TickFlow
 
 from app import secrets_store
+from app.tickflow.free_adapter import FreeSourceClient
 
 _sync_client: TickFlow | None = None
 _async_client: AsyncTickFlow | None = None
@@ -47,38 +46,55 @@ def _base_url() -> str | None:
     return secrets_store.load().get("tickflow_base_url") or None
 
 
-def get_client() -> TickFlow:
+def _is_free_source_mode() -> bool:
+    """是否启用免费公开数据源 adapter。"""
+    return secrets_store.get_data_backend() == "free_source"
+
+
+def get_client() -> TickFlow | FreeSourceClient:
     """同步客户端。能力探测、盘后管道用。"""
     global _sync_client
     if _sync_client is None:
-        key = secrets_store.get_tickflow_key()
-        if _should_use_free_server():
+        if _is_free_source_mode():
+            _sync_client = FreeSourceClient()
+        elif _should_use_free_server():
             # none/free 档:走 free-api 服务器(无 key 或免费 key 被 SDK 忽略)
             _sync_client = TickFlow.free()
         else:
+            key = secrets_store.get_tickflow_key()
             _sync_client = TickFlow(api_key=key, base_url=_base_url())
     return _sync_client
 
 
-def get_async_client() -> AsyncTickFlow:
-    """异步客户端。FastAPI 请求路径上用。"""
+def get_async_client() -> AsyncTickFlow | FreeSourceClient:
+    """异步客户端。FastAPI 请求路径上用。
+
+    免费源 adapter 为同步实现(项目无异步调用方);返回同一类型对象。
+    """
     global _async_client
     if _async_client is None:
-        key = secrets_store.get_tickflow_key()
-        if _should_use_free_server():
+        if _is_free_source_mode():
+            _async_client = FreeSourceClient()
+        elif _should_use_free_server():
             _async_client = AsyncTickFlow.free()
         else:
+            key = secrets_store.get_tickflow_key()
             _async_client = AsyncTickFlow(api_key=key, base_url=_base_url())
     return _async_client
 
 
-def get_paid_realtime_client() -> TickFlow | None:
-    """实时行情专用付费服务器客户端。
+def get_paid_realtime_client() -> TickFlow | FreeSourceClient | None:
+    """实时行情专用客户端。
 
-    none/free 的历史日K仍走 get_client() 的 free-api；实时行情全部走付费服务器。
-    Free 档如果有有效 key，也使用这里的 paid endpoint 调按标的实时接口。
+    免费源模式下返回 FreeSourceClient(实时行情全部走公开源)。
+    none/free 的历史日K仍走 get_client() 的 free-api, 实时行情走付费服务器。
+    Free 档有有效 key 时, 也用这里的 paid endpoint 调按标的实时接口。
     """
     global _paid_realtime_client
+    if _is_free_source_mode():
+        if _paid_realtime_client is None:
+            _paid_realtime_client = FreeSourceClient()
+        return _paid_realtime_client
     key = secrets_store.get_tickflow_key()
     if not key:
         return None
@@ -96,12 +112,15 @@ def reset_clients() -> None:
 
 
 def current_mode() -> str:
-    """供 UI 显示当前模式。三态:
+    """供 UI 显示当前模式。四态: none / free / api_key / free_source。
 
+    - "free_source" : 免费公开数据源 adapter(东财/新浪/腾讯)
     - "none"    : 无 key / 无效 key(走 free-api,仅历史日K)
     - "free"    : 免费有效 key(走 free-api,仅历史日K)
     - "api_key" : 付费 key(starter+,走付费端点,有实时行情)
     """
+    if secrets_store.get_data_backend() == "free_source":
+        return "free_source"
     if not secrets_store.get_tickflow_key():
         return "none"
     from app.tickflow.policy import base_tier_name
@@ -114,9 +133,12 @@ def current_mode() -> str:
 def current_endpoint() -> str:
     """返回当前显示用的端点 URL(对应 endpoints.json 列表项)。
 
+    - 免费源模式:显示公开数据源标签
     - none/free 档:显示 free-api 服务器节点
     - 付费档:显示用户自定义端点(测速切换后)或默认付费节点 api.tickflow.org
     """
+    if secrets_store.get_data_backend() == "free_source":
+        return "免费公开数据源(东财/新浪/腾讯)"
     if _should_use_free_server():
         return FREE_ENDPOINT
     # 自定义端点(付费模式测速切换后):优先返回
