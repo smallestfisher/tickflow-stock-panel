@@ -237,14 +237,177 @@ class _Quotes:
     def __init__(self, client: FreeSourceClient):
         self._c = client
 
+    @staticmethod
+    def _parse_sina_line(line: str) -> dict | None:
+        """解析 hq_str_xxx="..." 一行 → quote dict(对齐 SDK 字段)。"""
+        if "=" not in line or not line.startswith("var "):
+            return None
+        prefix, _, rest = line.partition("=")
+        # prefix: var hq_str_sh600000 → sh600000
+        sina_code = prefix.split("_")[-1].strip()
+        rest = rest.strip().rstrip(";").strip('"')
+        parts = rest.split(",")
+        if len(parts) < 32:
+            return None
+        # 新浪 hq_str 字段(实测,到状态位为止,无涨跌幅/换手):
+        #   0=name 1=today_open 2=prev_close 3=current 4=high 5=low
+        #   6=bid 7=ask 8=volume(股) 9=amount(元)
+        #   10~19=买5量价 20~29=卖5量价 30=date 31=time 32=status(00)
+        # 涨跌额/涨跌幅新浪不直接给,按 last-prev 计算;换手新浪无,置 None
+        # (enriched 的换手由 volume/float_shares 在 pipeline 另算)。
+        name = parts[0]
+        open_p = _f(parts, 1)
+        prev_close = _f(parts, 2)
+        last_price = _f(parts, 3)
+        high = _f(parts, 4)
+        low = _f(parts, 5)
+        volume = _f(parts, 8)
+        amount = _f(parts, 9)
+        if last_price is not None and prev_close is not None:
+            change_amount = round(last_price - prev_close, 3)
+            change_pct = round(change_amount / prev_close * 100, 2) if prev_close else None
+        else:
+            change_amount = None
+            change_pct = None
+        turnover_rate = None
+        # 还原 symbol: sh600000 → 600000.SH / sz000001 → 000001.SZ / bj430047 → 430047.BJ
+        code = sina_code[2:]
+        exch = {"sh": "SH", "sz": "SZ", "bj": "BJ"}.get(sina_code[:2], "SH")
+        symbol = f"{code}.{exch}"
+        return {
+            "symbol": symbol,
+            "name": name,
+            "last_price": last_price,
+            "prev_close": prev_close,
+            "open": open_p,
+            "high": high,
+            "low": low,
+            "volume": volume,
+            "amount": amount,
+            "timestamp": _sina_timestamp(parts, 30, 31),
+            "session": "regular",
+            "ext": {
+                "name": name,
+                "change_amount": change_amount,
+                "change_pct": change_pct,
+                "turnover_rate": turnover_rate,
+                "amplitude": None,
+            },
+        }
+
+    def _fetch_sina(self, symbols: list[str]) -> list[dict]:
+        sina_list = _sina_symbols_param(symbols)
+        r = _http_get(self._c._http,
+                      "http://hq.sinajs.cn/rn=0",
+                      referer=SINA_REFERER, list=sina_list)
+        text = r.content.decode("gbk", errors="replace")
+        out = []
+        for line in text.splitlines():
+            q = self._parse_sina_line(line)
+            if q:
+                out.append(q)
+        return out
+
     def get(self, symbols, as_dataframe=False):
-        raise NotImplementedError
+        rows = self._fetch_sina(list(symbols))
+        if as_dataframe:
+            # 扁平化 ext.* 为列名(消费方按 ext.change_pct / ext.name 取)
+            flat = []
+            for r in rows:
+                ext = r.pop("ext") or {}
+                for k, v in ext.items():
+                    r[f"ext.{k}"] = v
+                flat.append(r)
+            return pd.DataFrame(flat)
+        return rows
 
     def get_by_symbols(self, symbols, as_dataframe=False):
         return self.get(symbols, as_dataframe=as_dataframe)
 
     def get_by_universes(self, universes, as_dataframe=False):
-        raise NotImplementedError
+        """东财 clist 按 universe 拉对应板块行情。"""
+        fs_map = {
+            "CN_Equity_A": "m:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81",
+            "CN_ETF": "b:MK0021,m:1+t:10,m:0+t:10",
+            "CN_Index": "m:1+s:2,m:0+t:5",
+            "CSI300": "b:BK0500",
+            "CSI500": "b:BK0806",
+            "SSE50": "b:BK0007",
+        }
+        out: list[dict] = []
+        for u in universes or []:
+            fs = fs_map.get(u)
+            if not fs:
+                continue
+            rows = self._fetch_em_clist(fs, fields="f12,f13,f14,f2,f3,f4,f5,f6,f15,f16,f17,f18")
+            out.extend(rows)
+        if as_dataframe:
+            return pd.DataFrame(out)
+        return out
+
+    def _fetch_em_clist(self, fs: str, fields: str) -> list[dict]:
+        """东财 clist 实时行情 → SDK quote dict。"""
+        out = []
+        pn = 1
+        pz = 100
+        while True:
+            r = _http_get(self._c._http,
+                          "https://push2.eastmoney.com/api/qt/clist/get",
+                          referer=EM_REFERER,
+                          pn=pn, pz=pz, po=1, np=1, fltt=2, invt=2,
+                          fid="f3", fs=fs, fields=fields)
+            try:
+                data = r.json().get("data") or {}
+            except Exception:
+                break
+            diff = data.get("diff") or []
+            if not diff:
+                break
+            for d in diff:
+                code = str(d.get("f12") or "")
+                if not code:
+                    continue
+                mkt = str(d.get("f13") or "")
+                if code.startswith(("430", "830", "920")):
+                    sym_ex = "BJ"
+                else:
+                    sym_ex = "SH" if mkt == "1" else "SZ"
+                last = _f(d, "f2")
+                change_pct = _f(d, "f3")
+                change_amount = _f(d, "f4")
+                volume = _f(d, "f5")
+                amount = _f(d, "f6")
+                high = _f(d, "f15")
+                low = _f(d, "f16")
+                open_p = _f(d, "f17")
+                prev_close = _f(d, "f18")
+                out.append({
+                    "symbol": f"{code}.{sym_ex}",
+                    "name": d.get("f14") or code,
+                    "last_price": last,
+                    "prev_close": prev_close,
+                    "open": open_p,
+                    "high": high,
+                    "low": low,
+                    "volume": volume,
+                    "amount": amount,
+                    "timestamp": None,
+                    "session": "regular",
+                    "ext": {
+                        "name": d.get("f14") or code,
+                        "change_amount": change_amount,
+                        "change_pct": change_pct,
+                        "turnover_rate": None,
+                        "amplitude": None,
+                    },
+                })
+            if len(diff) < pz:
+                break
+            pn += 1
+            if pn > 200:
+                break
+            time.sleep(0.05)
+        return out
 
 
 class _Depth:

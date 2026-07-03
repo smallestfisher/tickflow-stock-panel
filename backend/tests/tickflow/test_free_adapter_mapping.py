@@ -166,3 +166,57 @@ def test_intraday_count_tail():
     recs = client.klines.intraday("600000.SH", count=2, as_dataframe=False)
     assert len(recs) == 2
     assert recs[-1]["time"] == "0932"
+
+
+def _sina_hq_transport(raw_by_sina):
+    """raw_by_sina: {"sh600000": 'var hq_str_sh600000="浦发银行,8.690,8.700,...";'}"""
+    def handler(request):
+        list_param = request.url.params.get("list", "")
+        body = ""
+        for s in list_param.split(","):
+            if s in raw_by_sina:
+                body += raw_by_sina[s] + "\n"
+        return httpx.Response(200, content=body.encode("gbk"),
+                              headers={"Content-Type": "text/html; charset=gbk"})
+    return httpx.MockTransport(handler)
+
+
+# 实测 sina hq_str 到状态位(00)为止,无涨跌幅/换手字段。
+# 字段: name,open,prev_close,last,high,low,bid,ask,vol,amount,
+#        [买5量价 10~19],[卖5量价 20~29],date(30),time(31),status(32)
+_SINA_600000 = (
+    'var hq_str_sh600000="浦发银行,8.690,8.700,8.750,8.820,8.660,8.750,8.760,'
+    '22910251,200620309.000,53000,8.750,115800,8.740,222600,8.730,176400,8.720,'
+    '407500,8.710,220000,8.760,44900,8.770,163400,8.780,192200,8.790,272000,'
+    '8.800,2026-07-03,10:13:29,00";'
+)
+
+
+def test_quotes_get_as_dataframe_false():
+    transport = _sina_hq_transport({"sh600000": _SINA_600000})
+    client = FreeSourceClient(transport=transport)
+    resp = client.quotes.get(["600000.SH"], as_dataframe=False)
+    assert resp and resp[0]["symbol"] == "600000.SH"
+    assert resp[0]["name"] == "浦发银行"
+    assert resp[0]["last_price"] == 8.750
+    assert resp[0]["prev_close"] == 8.700
+    assert resp[0]["open"] == 8.690
+    assert resp[0]["high"] == 8.820
+    assert resp[0]["low"] == 8.660
+    assert resp[0]["volume"] == 22910251
+    assert resp[0]["amount"] == 200620309.0
+    # 涨跌额/涨跌幅按 last-prev 计算(sina 不直接给)
+    assert resp[0]["ext"]["change_amount"] == 0.050
+    assert resp[0]["ext"]["change_pct"] == 0.57
+    # sina hq_str 无换手率,置 None(enriched pipeline 另算)
+    assert resp[0]["ext"]["turnover_rate"] is None
+
+
+def test_quotes_get_as_dataframe_true():
+    transport = _sina_hq_transport({"sh600000": _SINA_600000})
+    client = FreeSourceClient(transport=transport)
+    df = client.quotes.get(["600000.SH"], as_dataframe=True)
+    assert "symbol" in df.columns
+    assert "last_price" in df.columns
+    assert "ext.change_pct" in df.columns
+    assert "ext.name" in df.columns
