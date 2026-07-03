@@ -32,7 +32,7 @@ _CAPSET_CACHE_FILE = "capabilities.json"
 # v2: 拆分 depth5 → depth5(单只) + depth5.batch(批量)
 # v3: 探测补全 quote.batch(此前 tiers.yaml 声明了但 _probe_real 漏探测)
 # v5: Free 档补充付费服务器 quote.by_symbol(10rpm/5标的),用于自选股实时监控。
-_CACHE_SCHEMA_VERSION = 5
+_CACHE_SCHEMA_VERSION = 6   # v6: 新增 free_source 模式(免费公开源 adapter,全能力不经探测)
 
 # 探测用最小代价请求:挑流通性最好的 1 只标的试
 _PROBE_SYMBOL = "600000.SH"  # 浦发银行,长期不会退市
@@ -259,6 +259,23 @@ def detect_capabilities(force: bool = False) -> CapabilitySet:
                     cached.get("schema_version"), _CACHE_SCHEMA_VERSION)
 
     tiers = _load_tiers_yaml()
+    from app import secrets_store
+    if secrets_store.get_data_backend() == "free_source":
+        # 免费公开源 adapter — 不经 TickFlow 探测,直接给全能力 capset
+        # 限速取 expert 档(公开源无 key 限制,用此值做 adapter 内部自我节流)
+        capset = _tier_to_capset(tiers["expert"])
+        # 确保所有 Cap 都在(expert 档若缺个别 cap 也补上,默认空 limits)
+        for cap in Cap:
+            if not capset.has(cap):
+                capset._caps[cap] = CapabilityLimits()
+        _persist(
+            capset,
+            "免费源(东财/新浪/腾讯)",
+            log=["免费公开数据源 adapter 模式(全能力,不经 TickFlow 探测)"],
+            missing=[],
+            extras=[],
+        )
+        return capset
     if settings.use_free_mode:
         # 无 key —— 归 none 档(走 free-api 服务器,仅历史日K)
         capset = _tier_to_capset(tiers["none"])
@@ -541,9 +558,12 @@ def is_invalid_key() -> bool:
 
 
 def base_tier_name() -> str:
-    """当前档位的基础名(小写): none / free / starter / pro / expert。
+    """当前档位的基础名(小写): none / free / starter / pro / expert / free_source。
 
     供 client 层判断"是否走 free-api 服务器"(none/free → free 服务器)。
     """
+    from app import secrets_store
+    if secrets_store.get_data_backend() == "free_source":
+        return "free_source"
     label = tier_label()
     return label.split()[0].split("+")[0].strip().lower()
