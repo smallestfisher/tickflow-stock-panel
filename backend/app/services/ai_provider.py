@@ -26,7 +26,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def current_ai_provider() -> str:
-    return secrets_store.get_ai_config("ai_provider", settings.ai_provider) or OPENAI_COMPAT_PROVIDER
+    val = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
+    return val or OPENAI_COMPAT_PROVIDER
 
 
 def current_ai_model() -> str:
@@ -89,14 +90,39 @@ def ai_configured(provider: str | None = None) -> bool:
     return bool(secrets_store.get_ai_key())
 
 
+def live_search_enabled() -> bool:
+    """联网检索(Live Search)全局开关。"""
+    return secrets_store.get_ai_live_search()
+
+
+# Live Search 检索参数(xAI / 兼容中转站)。mode=on 强制每次检索。
+# 中转站实测不返回结构化 citations,来源由模型内联进正文 Markdown。
+_SEARCH_PARAMETERS = {"mode": "on", "return_citations": True, "max_search_results": 8}
+
+
+def _search_extra_body(live_search: bool | None) -> dict:
+    """按开关返回 create() 的 extra_body(codex 分支不调用此函数)。
+
+    live_search=None → 跟随全局开关;显式 True/False 覆盖。
+    """
+    enabled = live_search_enabled() if live_search is None else live_search
+    if enabled:
+        return {"extra_body": {"search_parameters": _SEARCH_PARAMETERS}}
+    return {}
+
+
 async def generate_ai_text(
     messages: Sequence[Message],
     *,
     temperature: float = 0.3,
     max_tokens: int = 3000,
     timeout: float = 180.0,
+    live_search: bool | None = None,
 ) -> str:
-    """Return a complete AI response from the currently configured provider."""
+    """Return a complete AI response from the currently configured provider.
+
+    live_search: None 跟随全局开关;True/False 显式覆盖。Codex CLI 不支持检索,忽略此参数。
+    """
     if is_codex_cli_provider():
         return await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
     return await _run_openai_once(
@@ -104,6 +130,7 @@ async def generate_ai_text(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        live_search=live_search,
     )
 
 
@@ -113,11 +140,14 @@ async def stream_ai_text(
     temperature: float = 0.5,
     max_tokens: int = 4000,
     timeout: float = 180.0,
+    live_search: bool | None = None,
 ) -> AsyncIterator[str]:
     """Yield text deltas from the configured provider.
 
     Codex CLI only exposes the final assistant message for this use case, so it
     yields one complete chunk after the command exits.
+
+    live_search: None 跟随全局开关;True/False 显式覆盖。Codex CLI 忽略此参数。
     """
     if is_codex_cli_provider():
         yield await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
@@ -128,6 +158,7 @@ async def stream_ai_text(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        live_search=live_search,
     ):
         yield chunk
 
@@ -138,6 +169,7 @@ async def _run_openai_once(
     temperature: float,
     max_tokens: int,
     timeout: float,
+    live_search: bool | None = None,
 ) -> str:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
@@ -149,6 +181,7 @@ async def _run_openai_once(
         messages=list(messages),
         temperature=temperature,
         max_tokens=max_tokens,
+        **_search_extra_body(live_search),
     )
     if not resp.choices:
         return ""
@@ -161,6 +194,7 @@ async def _stream_openai(
     temperature: float,
     max_tokens: int,
     timeout: float,
+    live_search: bool | None = None,
 ) -> AsyncIterator[str]:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
@@ -173,6 +207,7 @@ async def _stream_openai(
         temperature=temperature,
         max_tokens=max_tokens,
         stream=True,
+        **_search_extra_body(live_search),
     )
 
     async for chunk in stream:
@@ -184,10 +219,14 @@ async def _stream_openai(
 def _openai_client(api_key: str, timeout: float):
     from openai import AsyncOpenAI
 
-    user_agent = secrets_store.get_ai_config("ai_user_agent", "") or settings.ai_user_agent
+    user_agent = secrets_store.get_ai_config("ai_user_agent", "")
+    if not user_agent:
+        user_agent = settings.ai_user_agent
     return AsyncOpenAI(
         api_key=api_key,
-        base_url=normalize_openai_base_url(secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)),
+        base_url=normalize_openai_base_url(
+            secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
+        ),
         timeout=timeout,
         max_retries=2,
         default_headers={"User-Agent": user_agent},

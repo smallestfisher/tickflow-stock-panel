@@ -78,6 +78,7 @@ def get_settings() -> dict:
         "ai_model": current_ai_model(),
         "ai_codex_command": current_codex_command(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
+        "ai_live_search": secrets_store.get_ai_live_search(),
     }
 
 
@@ -263,13 +264,20 @@ class AiSettingsIn(BaseModel):
     model: str = ""
     codex_command: str = ""
     user_agent: str = ""
+    live_search: bool | None = None
 
 
 @router.post("/ai")
 def save_ai_settings(req: AiSettingsIn) -> dict:
     """保存 AI 配置（全部持久化到 secrets.json）"""
     from app.config import settings
-    from app.services.ai_provider import ai_configured, current_ai_model, current_ai_provider, current_codex_command, normalize_codex_command
+    from app.services.ai_provider import (
+        ai_configured,
+        current_ai_model,
+        current_ai_provider,
+        current_codex_command,
+        normalize_codex_command,
+    )
 
     updates: dict = {}
     if req.provider:
@@ -302,6 +310,11 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
 
+    # 联网检索开关(全局):None 表示前端未提交,保持原值不动
+    if req.live_search is not None:
+        updates["ai_live_search"] = req.live_search
+        settings.ai_live_search = req.live_search
+
     if updates:
         secrets_store.save(updates)
 
@@ -312,6 +325,7 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         "ai_model": current_ai_model(),
         "ai_codex_command": current_codex_command(),
         "ai_configured": ai_configured(provider),
+        "ai_live_search": secrets_store.get_ai_live_search(),
     }
 
 
@@ -323,13 +337,17 @@ def clear_ai_settings() -> dict:
     """
     from app.config import settings
 
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command")
+    secrets_store.clear(
+        "ai_provider", "ai_base_url", "ai_api_key", "ai_model",
+        "ai_codex_command", "ai_live_search",
+    )
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
     settings.ai_api_key = ""
     settings.ai_model = ""
     settings.ai_codex_command = "codex"
+    settings.ai_live_search = False
 
     return {"ok": True}
 

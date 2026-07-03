@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = "gpt-5.5"
     ai_codex_command: str = "codex"
+    # 联网检索(Live Search)全局开关。开启后 openai_compat 调用透传
+    # search_parameters 给中转站/xAI,个股分析消息面改为实时检索新闻(需模型支持,如 Grok)。
+    ai_live_search: bool = False
     # 默认浏览器风格 UA,绕过 Cloudflare 等 CDN/WAF 的 Bot 拦截(Issue #8)。
     # 用户可在 AI 设置页按需修改。
     ai_user_agent: str = (

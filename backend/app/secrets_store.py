@@ -87,6 +87,19 @@ def get_ai_config(key: str, default: str = "") -> str:
     return getattr(settings, key, default) or default
 
 
+def get_ai_live_search() -> bool:
+    """联网检索(Live Search)全局开关:secrets.json 优先,否则 config 默认(False)。"""
+    data = load()
+    if "ai_live_search" in data:
+        val = data.get("ai_live_search")
+        # 兼容字符串 "true"/"false"(JSON 存储偶尔可能是字符串)
+        if isinstance(val, str):
+            return val.lower() == "true"
+        return bool(val)
+    from app.config import settings
+    return bool(getattr(settings, "ai_live_search", False))
+
+
 def mask(key: str, prefix: int = 4, suffix: int = 4) -> str:
     """脱敏显示。"""
     if not key:

@@ -24,11 +24,12 @@ const CODEX_MODEL_OPTIONS = [
   { label: 'gpt-5', value: 'gpt-5', hint: '通用模型' },
 ]
 
-const PRESETS: { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: string; partner?: boolean; promo?: string }[] = [
+const PRESETS: { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: string; partner?: boolean; promo?: string; liveSearch?: boolean }[] = [
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-v4-pro', website: 'https://www.deepseek.com/', websiteLabel: 'deepseek.com', description: 'DeepSeek 官方 OpenAI 兼容接口。' },
   { label: '通义千问', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-3.6plus', website: 'https://tongyi.aliyun.com/', websiteLabel: 'tongyi.aliyun.com', description: '阿里云 DashScope 兼容模式接口。' },
   { label: '智谱 GLM', url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2', website: 'https://open.bigmodel.cn/', websiteLabel: 'open.bigmodel.cn', description: '智谱 AI 官方 OpenAI 兼容接口。' },
   { label: 'Kimi', url: 'https://api.moonshot.cn/v1', model: 'kimi-k2.6', website: 'https://platform.moonshot.cn/', websiteLabel: 'platform.moonshot.cn', description: '月之暗面 Moonshot 官方 OpenAI 兼容接口，支持超长上下文。' },
+  { label: 'Grok(联网检索)', url: 'https://jiuuij.de5.net', model: 'grok-4.20-multi-agent-xhigh', website: 'https://x.ai/', websiteLabel: 'x.ai', description: 'xAI Grok 模型(中转),支持 Live Search 联网实时检索新闻/公告,个股消息面补真实来源。', liveSearch: true },
   { label: 'Codex CLI', provider: CODEX_PROVIDER, url: '', model: '', codexCommand: CODEX_COMMAND, website: 'https://developers.openai.com/codex/noninteractive', websiteLabel: 'codex exec', description: '调用本机 Codex CLI 的 codex exec, 适合已登录 ChatGPT/Codex 的本地环境。' },
   { label: '炸鸡中转站', url: 'https://code.alysc.top/v1', model: 'gpt-5.5', website: 'https://code.alysc.top/sign-up?aff=1afk', websiteLabel: 'code.alysc.top', description: 'OpenAI 兼容中转服务，适合直接使用国际模型。', partner: true, promo: '通过链接邀请注册赠送免费额度 · 国际模型最低0.01倍率' },
 ]
@@ -46,6 +47,7 @@ export function SettingsAIPanel() {
   const [codexCommand, setCodexCommand] = useState(CODEX_COMMAND)
   const [customUa, setCustomUa] = useState(false)
   const [userAgent, setUserAgent] = useState('')
+  const [liveSearch, setLiveSearch] = useState(false)
   const [showKey, setShowKey] = useState(false)
   const [saved, setSaved] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
@@ -69,6 +71,7 @@ export function SettingsAIPanel() {
     const ua = s.ai_user_agent ?? ''
     setCustomUa(!!ua)
     setUserAgent(ua)
+    setLiveSearch(s.ai_live_search ?? false)
   }, [s])
 
   const payload = () => ({
@@ -78,6 +81,7 @@ export function SettingsAIPanel() {
     model,
     codex_command: isCodexProvider ? CODEX_COMMAND : codexCommand,
     user_agent: customUa ? userAgent : '',
+    live_search: liveSearch,
   })
 
   const save = useMutation({
@@ -112,6 +116,7 @@ export function SettingsAIPanel() {
       setModel('')
       setCodexCustomModel(false)
       setCodexCommand(CODEX_COMMAND)
+      setLiveSearch(false)
       setTestResult(null)
       qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
         ...prev,
@@ -144,6 +149,7 @@ export function SettingsAIPanel() {
     setModel(p.model)
     setCodexCustomModel(false)
     if (p.codexCommand) setCodexCommand(CODEX_COMMAND)
+    if (p.liveSearch !== undefined) setLiveSearch(p.liveSearch)
   }
 
   const handleTest = async () => {
@@ -301,6 +307,21 @@ export function SettingsAIPanel() {
                   </button>
                 </div>
               </Field>
+
+              <div className="border-t border-border/20" />
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Field label="联网检索(Live Search)" inline>
+                    <Toggle checked={liveSearch} onChange={() => setLiveSearch(v => !v)} />
+                  </Field>
+                </div>
+                {liveSearch && (
+                  <div className="text-[10px] text-muted leading-relaxed">
+                    开启后个股分析的消息面将实时联网检索真实新闻/公告,依赖模型支持(如 Grok)。会更慢、更耗 token。
+                  </div>
+                )}
+              </div>
 
               <div className="border-t border-border/20" />
 
