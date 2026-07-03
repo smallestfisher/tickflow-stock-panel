@@ -232,3 +232,25 @@ def test_depth_batch():
     assert entry["bid_volumes"][0] == 53000
     assert entry["ask_volumes"][0] == 220000
     assert isinstance(entry["timestamp"], (int, float))
+
+
+def _em_datacenter_transport(rows_by_report):
+    """rows_by_report: {"RPT_LICO_FN_CPD": [{"SECURITY_CODE":"600000",...}]}"""
+    def handler(request):
+        rn = request.url.params.get("reportName")
+        rows = rows_by_report.get(rn, [])
+        return httpx.Response(200, json={"result": {"data": rows, "pages": 1}})
+    return httpx.MockTransport(handler)
+
+
+def test_financials_metrics():
+    transport = _em_datacenter_transport({"RPT_F10_FINANCE_DUPONT": [
+        {"SECURITY_CODE": "600000", "REPORT_DATE": "2026-03-31", "JROA": 0.0045,
+         "SALE_NPR": 39.01, "PARENT_NETPROFIT": 17861000000},
+    ]})
+    client = FreeSourceClient(transport=transport)
+    data = client.financials.metrics(["600000.SH"], latest=True)
+    assert "600000.SH" in data
+    rec = data["600000.SH"][0]
+    assert rec["SECURITY_CODE"] == "600000"
+    assert rec["symbol"] == "600000.SH"  # financial_sync 期待 record 上有 symbol

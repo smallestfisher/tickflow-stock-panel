@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pandas as pd
@@ -447,20 +447,54 @@ class _Depth:
 
 
 class _Financials:
+    # 东财 reportName 映射
+    _REPORTS: ClassVar[dict[str, str]] = {
+        "metrics": "RPT_F10_FINANCE_DUPONT",       # 杜邦,含 ROE/净利率/周转率
+        "income": "RPT_LICO_FN_CPD",               # 利润表
+        "balance_sheet": "RPT_DMSK_FN_BALANCE",    # 资产负债表
+        "cash_flow": "RPT_LICO_FN_CFR",            # 现金流量表
+    }
+
     def __init__(self, client: FreeSourceClient):
         self._c = client
 
+    def _fetch(self, table, symbols, latest=True):
+        report = self._REPORTS.get(table)
+        if not report:
+            return {}
+        out: dict = {}
+        for i, sym in enumerate(symbols):
+            if i > 0:
+                time.sleep(0.05)
+            code, _ = _split_symbol(sym)
+            r = _http_get(self._c._http,
+                          "https://datacenter.eastmoney.com/securities/api/data/v1/get",
+                          referer="https://emweb.securities.eastmoney.com/",
+                          reportName=report, columns="ALL",
+                          filter=f'(SECURITY_CODE="{code}")',
+                          pageNumber=1, pageSize=2 if latest else 50,
+                          sortColumns="REPORT_DATE", sortTypes=-1)
+            try:
+                rows = (r.json().get("result") or {}).get("data") or []
+            except Exception:
+                rows = []
+            # 给每条补 symbol(financial_sync 期待 record["symbol"] 存在)
+            for rec in rows:
+                rec["symbol"] = sym
+            out[sym] = rows
+        return out
+
     def metrics(self, symbols, latest=True, as_dataframe=False):
-        raise NotImplementedError
+        return self._fetch("metrics", list(symbols), latest)
 
     def income(self, symbols, latest=True, as_dataframe=False):
-        raise NotImplementedError
+        return self._fetch("income", list(symbols), latest)
 
     def balance_sheet(self, symbols, latest=True, as_dataframe=False):
-        raise NotImplementedError
+        return self._fetch("balance_sheet", list(symbols), latest)
 
     def cash_flow(self, symbols, latest=True, as_dataframe=False):
-        raise NotImplementedError
+        return self._fetch("cash_flow", list(symbols), latest)
 
 
 class _Exchanges:
