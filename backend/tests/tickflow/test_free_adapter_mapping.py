@@ -220,3 +220,15 @@ def test_quotes_get_as_dataframe_true():
     assert "last_price" in df.columns
     assert "ext.change_pct" in df.columns
     assert "ext.name" in df.columns
+
+
+def test_depth_batch():
+    transport = _sina_hq_transport({"sh600000": _SINA_600000})
+    client = FreeSourceClient(transport=transport)
+    d = client.depth.batch(["600000.SH"])
+    assert "600000.SH" in d
+    entry = d["600000.SH"]
+    # 新浪买5(parts 10~19): 量,价 交替;卖5(parts 20~29)
+    assert entry["bid_volumes"][0] == 53000
+    assert entry["ask_volumes"][0] == 220000
+    assert isinstance(entry["timestamp"], (int, float))

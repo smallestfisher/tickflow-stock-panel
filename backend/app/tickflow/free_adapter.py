@@ -415,7 +415,31 @@ class _Depth:
         self._c = client
 
     def batch(self, symbols):
-        raise NotImplementedError
+        # 复用 quotes 的新浪解析,五档在行情串 parts 10~29
+        sina_list = _sina_symbols_param(list(symbols))
+        r = _http_get(self._c._http, "http://hq.sinajs.cn/rn=0",
+                      referer=SINA_REFERER, list=sina_list)
+        text = r.content.decode("gbk", errors="replace")
+        out: dict = {}
+        for line in text.splitlines():
+            parsed = _Quotes._parse_sina_line(line)
+            if not parsed:
+                continue
+            # 重新从原始 line 取原始 parts(解析函数已丢弃五档)
+            rest = line.split("=", 1)[-1].strip().rstrip(";").strip('"')
+            parts = rest.split(",")
+            if len(parts) < 30:
+                continue
+            sym = parsed["symbol"]
+            # 买5: parts[10..19] = b1vol,b1price,b2vol,b2price,...
+            bid_vols = [_f(parts, i) for i in range(10, 20, 2)]
+            ask_vols = [_f(parts, i) for i in range(20, 30, 2)]
+            out[sym] = {
+                "ask_volumes": ask_vols,
+                "bid_volumes": bid_vols,
+                "timestamp": parsed.get("timestamp") or 0,
+            }
+        return out
 
     def get(self, symbol):
         d = self.batch([symbol])
