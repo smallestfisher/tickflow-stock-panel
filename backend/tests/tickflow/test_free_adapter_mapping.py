@@ -286,7 +286,8 @@ def _em_datacenter_transport(rows_by_report):
 def test_financials_metrics():
     transport = _em_datacenter_transport({"RPT_F10_FINANCE_DUPONT": [
         {"SECURITY_CODE": "600000", "REPORT_DATE": "2026-03-31", "JROA": 0.0045,
-         "SALE_NPR": 39.01, "PARENT_NETPROFIT": 17861000000},
+         "SALE_NPR": 39.01, "ROE_AVG": 2.1, "DEBT_ASSET_RATIO": 91.8,
+         "PARENT_NETPROFIT": 17861000000},
     ]})
     client = FreeSourceClient(transport=transport)
     data = client.financials.metrics(["600000.SH"], latest=True)
@@ -295,6 +296,29 @@ def test_financials_metrics():
     assert rec["SECURITY_CODE"] == "600000"
     assert rec["symbol"] == "600000.SH"  # financial_sync 期待 record 上有 symbol
     # Fix 3: financial_analyzer 按 period_end 排序 + 摘要,东财 REPORT_DATE 映射为 period_end
+    assert rec["period_end"] == "2026-03-31"
+    # 方案 B: 东财大写字段 → 前端 FIELD_DEFS 期望的 SDK 蛇形键(原始键保留供 AI)
+    assert rec["roe"] == 2.1              # ROE_AVG → roe
+    assert rec["roa"] == 0.0045           # JROA → roa
+    assert rec["net_margin"] == 39.01     # SALE_NPR → net_margin
+    assert rec["debt_to_asset_ratio"] == 91.8
+    assert rec["ROE_AVG"] == 2.1          # 原始东财键仍在
+
+
+def test_financials_income_reportname_and_mapping():
+    """income 用 RPT_DMSK_FN_INCOME(修正后的有效 reportName)+ 字段映射。"""
+    transport = _em_datacenter_transport({"RPT_DMSK_FN_INCOME": [
+        {"SECURITY_CODE": "600519", "REPORT_DATE": "2026-03-31",
+         "TOTAL_OPERATE_INCOME": 51443000000, "NETPROFIT": 27716000000,
+         "OPERATE_COST": 3800000000, "BASIC_EPS": 22.06},
+    ]})
+    client = FreeSourceClient(transport=transport)
+    data = client.financials.income(["600519.SH"], latest=True)
+    rec = data["600519.SH"][0]
+    assert rec["revenue"] == 51443000000        # TOTAL_OPERATE_INCOME → revenue
+    assert rec["net_income"] == 27716000000     # NETPROFIT → net_income
+    assert rec["operating_cost"] == 3800000000  # OPERATE_COST → operating_cost
+    assert rec["basic_eps"] == 22.06            # BASIC_EPS → basic_eps
     assert rec["period_end"] == "2026-03-31"
 
 

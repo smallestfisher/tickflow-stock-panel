@@ -464,12 +464,62 @@ class _Depth:
 
 
 class _Financials:
-    # 东财 reportName 映射
+    # 东财 reportName(实测有效值):四张表统一用 datacenter v1 端点。
+    # 注意:income/cash_flow 曾误用 RPT_LICO_FN_CPD / RPT_LICO_FN_CFR —— 前者报
+    # "REPORT_DATE排序列不存在"、后者"报表配置不存在",均无效。改用 RPT_DMSK_FN_* 系列。
     _REPORTS: ClassVar[dict[str, str]] = {
-        "metrics": "RPT_F10_FINANCE_DUPONT",       # 杜邦,含 ROE/净利率/周转率
-        "income": "RPT_LICO_FN_CPD",               # 利润表
-        "balance_sheet": "RPT_DMSK_FN_BALANCE",    # 资产负债表
-        "cash_flow": "RPT_LICO_FN_CFR",            # 现金流量表
+        "metrics": "RPT_F10_FINANCE_DUPONT",       # 杜邦,含 ROE/净利率/ROA/资产负债率
+        "income": "RPT_DMSK_FN_INCOME",            # 利润表(单季主要科目)
+        "balance_sheet": "RPT_DMSK_FN_BALANCE",    # 资产负债表(主要科目)
+        "cash_flow": "RPT_DMSK_FN_CASHFLOW",       # 现金流量表(三项净额)
+    }
+
+    # 东财大写字段 → 前端 FIELD_DEFS 期望的 SDK 蛇形键(方案 B:只映射能对上的核心字段,
+    # 东财缺失的字段前端自然显示 —)。金额单位为元(与 fmtBigNum 一致)、比率为百分点
+    # (与前端 pct 格式一致),无需换算。原始东财键保留,供 AI 分析(它整体喂 LLM)。
+    _FIELD_MAP: ClassVar[dict[str, dict[str, str]]] = {
+        "metrics": {
+            "ROE_AVG": "roe",
+            "JROA": "roa",
+            "SALE_NPR": "net_margin",
+            "DEBT_ASSET_RATIO": "debt_to_asset_ratio",
+        },
+        "income": {
+            "TOTAL_OPERATE_INCOME": "revenue",
+            "OPERATE_COST": "operating_cost",
+            "OPERATE_PROFIT": "operating_profit",
+            "SALE_EXPENSE": "selling_expense",
+            "MANAGE_EXPENSE": "admin_expense",
+            "FINANCE_EXPENSE": "financial_expense",
+            "TOTAL_PROFIT": "total_profit",
+            "INCOME_TAX": "income_tax",
+            "NETPROFIT": "net_income",
+            "PARENT_NETPROFIT": "net_income_attributable",
+            "DEDUCT_PARENT_NETPROFIT": "net_income_deducted",
+            "BASIC_EPS": "basic_eps",
+            "DILUTED_EPS": "diluted_eps",
+        },
+        "balance_sheet": {
+            "TOTAL_ASSETS": "total_assets",
+            "TOTAL_CURRENT_ASSETS": "total_current_assets",
+            "TOTAL_NONCURRENT_ASSETS": "total_non_current_assets",
+            "MONETARYFUNDS": "cash_and_equivalents",
+            "ACCOUNTS_RECE": "accounts_receivable",
+            "INVENTORY": "inventory",
+            "FIXED_ASSET": "fixed_assets",
+            "TOTAL_LIABILITIES": "total_liabilities",
+            "TOTAL_CURRENT_LIAB": "total_current_liabilities",
+            "TOTAL_NONCURRENT_LIAB": "total_non_current_liabilities",
+            "ACCOUNTS_PAYABLE": "accounts_payable",
+            "TOTAL_EQUITY": "total_equity",
+            "TOTAL_PARENT_EQUITY": "equity_attributable",
+        },
+        "cash_flow": {
+            "NETCASH_OPERATE": "net_operating_cash_flow",
+            "NETCASH_INVEST": "net_investing_cash_flow",
+            "NETCASH_FINANCE": "net_financing_cash_flow",
+            "CCE_ADD": "net_cash_change",
+        },
     }
 
     def __init__(self, client: FreeSourceClient):
@@ -479,6 +529,7 @@ class _Financials:
         report = self._REPORTS.get(table)
         if not report:
             return {}
+        field_map = self._FIELD_MAP.get(table, {})
         out: dict = {}
         for i, sym in enumerate(symbols):
             if i > 0:
@@ -495,14 +546,19 @@ class _Financials:
                 rows = (r.json().get("result") or {}).get("data") or []
             except Exception:
                 rows = []
-            # 给每条补 symbol(financial_sync 期待 record["symbol"] 存在);
-            # 东财报告期字段 REPORT_DATE → period_end(financial_analyzer 排序/摘要依赖)。
+            # 每条 record 上补三样东西(原始东财键全部保留,供 AI 整体喂 LLM):
+            #   1. symbol —— financial_sync 期待 record["symbol"] 存在
+            #   2. period_end —— financial_analyzer 排序/摘要依赖(东财为 REPORT_DATE)
+            #   3. 前端 FIELD_DEFS 期望的 SDK 蛇形键 —— 否则财务详情页四个 Tab 全显示 —
             for rec in rows:
                 rec["symbol"] = sym
                 if "period_end" not in rec:
                     rd = rec.get("REPORT_DATE")
                     if rd:
                         rec["period_end"] = str(rd)[:10]
+                for em_key, sdk_key in field_map.items():
+                    if sdk_key not in rec and em_key in rec:
+                        rec[sdk_key] = rec[em_key]
             out[sym] = rows
         return out
 
