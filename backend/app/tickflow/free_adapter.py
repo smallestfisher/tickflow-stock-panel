@@ -191,7 +191,63 @@ class _Exchanges:
         self._c = client
 
     def get_instruments(self, exchange, instrument_type="stock"):
-        raise NotImplementedError
+        ex = exchange.upper()
+        # 东财 clist 的 fs 过滤器:按交易所 x 品种
+        fs_map = {
+            ("SH", "stock"): "m:1+t:2,m:1+t:23",      # 沪主板 + 科创板
+            ("SZ", "stock"): "m:0+t:6,m:0+t:80",      # 深主板 + 创业板
+            ("BJ", "stock"): "m:0+t:81",              # 北证
+            ("SH", "index"): "m:1+s:2",               # 上证指数
+            ("SZ", "index"): "m:0+t:5",               # 深证指数
+            ("SH", "etf"): "b:MK0021,m:1+t:10",       # 沪市 ETF
+            ("SZ", "etf"): "b:MK0021,m:0+t:10",       # 深市 ETF
+        }
+        fs = fs_map.get((ex, instrument_type))
+        if fs is None:
+            return []
+        fields = "f12,f13,f14,f3,f6"  # code, market, name, change_pct, amount
+        out: list[dict] = []
+        pn = 1
+        pz = 100
+        while True:
+            r = _http_get(self._c._http,
+                          "https://push2.eastmoney.com/api/qt/clist/get",
+                          referer=EM_REFERER,
+                          pn=pn, pz=pz, po=1, np=1, fltt=2, invt=2,
+                          fid="f12", fs=fs, fields=fields)
+            try:
+                data = r.json().get("data") or {}
+            except Exception:
+                break
+            diff = data.get("diff") or []
+            if not diff:
+                break
+            for d in diff:
+                code = str(d.get("f12") or "")
+                if not code:
+                    continue
+                # f13 是市场代码(1=沪,0=深),用于精确判交易所;BJ 代码段单独识别
+                mkt = str(d.get("f13") or "")
+                if code.startswith(("430", "830", "920")):
+                    sym_ex = "BJ"
+                else:
+                    sym_ex = "SH" if mkt == "1" else "SZ"
+                out.append({
+                    "symbol": f"{code}.{sym_ex}",
+                    "name": d.get("f14") or code,
+                    "code": code,
+                    "exchange": sym_ex,
+                    "region": "CN",
+                    "type": instrument_type,
+                    "ext": {},
+                })
+            if len(diff) < pz:
+                break
+            pn += 1
+            if pn > 200:  # 安全上限
+                break
+            time.sleep(0.05)  # 翻页自我节流
+        return out
 
 
 class _Universes:
