@@ -1,0 +1,224 @@
+"""免费公开数据源 adapter —— 鸭子类型对齐 TickFlow SDK。
+
+FreeSourceClient 的属性结构(.klines/.quotes/.depth/.financials/.exchanges/.universes)
+与方法签名与 TickFlow SDK 一致,内部翻译成东方财富/新浪/腾讯的公开 HTTP 接口。
+client.py 在 data_backend=="free_source" 时返回本对象,十几个 service 零改动。
+
+返回结构对齐 SDK:
+  - as_dataframe=False → dict / list[dict]
+  - as_dataframe=True  → pandas DataFrame(消费方经 pl.from_pandas 取用)
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120"
+EM_REFERER = "https://quote.eastmoney.com/"
+SINA_REFERER = "https://finance.sina.com.cn"
+TIMEOUT = 10.0
+
+# 交易所后缀 → 东财 secid 市场前缀
+_EXCHANGE_TO_EM_MARKET = {"SH": "1", "SZ": "0", "BJ": "0"}
+_EM_MARKET_TO_EXCHANGE = {"1": "SH", "0": "SZ"}  # BJ 与 SZ 同为 0,反查时按代码段区分
+
+
+def _split_symbol(symbol: str) -> tuple[str, str]:
+    """600000.SH → ("600000", "SH")。"""
+    code, _, exch = symbol.rpartition(".")
+    if not exch:
+        raise ValueError(f"bad symbol: {symbol}")
+    return code, exch
+
+
+def _symbol_to_secid(symbol: str) -> str:
+    code, exch = _split_symbol(symbol)
+    market = _EXCHANGE_TO_EM_MARKET.get(exch.upper())
+    if market is None:
+        raise ValueError(f"unsupported exchange: {symbol}")
+    return f"{market}.{code}"
+
+
+def _secid_to_symbol(secid: str) -> str:
+    market, _, code = secid.partition(".")
+    if code.startswith(("430", "830", "920")):
+        # 北交所代码段(430/830/920 开头),市场前缀同为 0
+        return f"{code}.BJ"
+    exch = _EM_MARKET_TO_EXCHANGE.get(market, "SZ")
+    return f"{code}.{exch}"
+
+
+def _sina_symbol(symbol: str) -> str:
+    """600000.SH → sh600000。"""
+    code, exch = _split_symbol(symbol)
+    return f"{exch.lower()}{code}"
+
+
+def _sina_symbols_param(symbols: list[str]) -> str:
+    return ",".join(_sina_symbol(s) for s in symbols)
+
+
+def _f(d, key, default=None):
+    """安全取值并转 float;东财 '-' 表示无数据。支持 dict 按键 / list 按下标。"""
+    if isinstance(d, dict):
+        v = d.get(key)
+    elif isinstance(d, (list, tuple)) and isinstance(key, int) and 0 <= key < len(d):
+        v = d[key]
+    else:
+        return default
+    if v in (None, "-", ""):
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sina_timestamp(parts, date_idx, time_idx) -> int | None:
+    """新浪 date(2026-07-03)+time(10:13:29) → ms epoch。无则 None。"""
+    try:
+        from datetime import datetime
+        d = parts[date_idx]
+        t = parts[time_idx]
+        dt = datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M:%S")
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def _is_transient(e: Exception) -> bool:
+    """与 policy._is_transient 同语义:5xx/429/超时/连接为瞬时。"""
+    status = getattr(e, "status_code", None)
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    return isinstance(e, (httpx.TimeoutException, httpx.TransportError))
+
+
+def _http_get(http: httpx.Client, url: str, *, referer: str = EM_REFERER, **params) -> Any:
+    """带 UA/Referer/重试的 GET。瞬时错误退避 2 次。"""
+    last: Exception | None = None
+    for i in range(3):
+        try:
+            r = http.get(url, params=params, headers={"User-Agent": UA, "Referer": referer},
+                         timeout=TIMEOUT)
+            # 5xx 视为瞬时
+            if r.status_code >= 500:
+                raise httpx.HTTPStatusError(f"{r.status_code}", request=r.request, response=r)
+            return r
+        except Exception as e:
+            last = e
+            if not _is_transient(e):
+                raise
+            if i < 2:
+                time.sleep(0.6 * (i + 1))
+    assert last is not None
+    raise last
+
+
+class _Klines:
+    def __init__(self, client: FreeSourceClient):
+        self._c = client
+
+    def batch(self, symbols, period="1d", count=250, adjust="none",
+              start_time=None, end_time=None, as_dataframe=True, show_progress=False):
+        raise NotImplementedError
+
+    def get(self, symbol, period="1d", count=250, adjust="none",
+            start_time=None, end_time=None, as_dataframe=False, show_progress=False):
+        raise NotImplementedError
+
+    def ex_factors(self, symbols, as_dataframe=False, batch_size=None, show_progress=False,
+                   start_time=None, end_time=None):
+        return {}  # 公开源直接返回前复权价,无原始因子;空 dict 让 _normalize_adj_factor 自然跳过
+
+    def intraday(self, symbol, count=None, as_dataframe=False):
+        raise NotImplementedError
+
+    def intraday_batch(self, symbols, count=None, as_dataframe=False):
+        raise NotImplementedError
+
+
+class _Quotes:
+    def __init__(self, client: FreeSourceClient):
+        self._c = client
+
+    def get(self, symbols, as_dataframe=False):
+        raise NotImplementedError
+
+    def get_by_symbols(self, symbols, as_dataframe=False):
+        return self.get(symbols, as_dataframe=as_dataframe)
+
+    def get_by_universes(self, universes, as_dataframe=False):
+        raise NotImplementedError
+
+
+class _Depth:
+    def __init__(self, client: FreeSourceClient):
+        self._c = client
+
+    def batch(self, symbols):
+        raise NotImplementedError
+
+    def get(self, symbol):
+        d = self.batch([symbol])
+        return d.get(symbol) if d else None
+
+
+class _Financials:
+    def __init__(self, client: FreeSourceClient):
+        self._c = client
+
+    def metrics(self, symbols, latest=True, as_dataframe=False):
+        raise NotImplementedError
+
+    def income(self, symbols, latest=True, as_dataframe=False):
+        raise NotImplementedError
+
+    def balance_sheet(self, symbols, latest=True, as_dataframe=False):
+        raise NotImplementedError
+
+    def cash_flow(self, symbols, latest=True, as_dataframe=False):
+        raise NotImplementedError
+
+
+class _Exchanges:
+    def __init__(self, client: FreeSourceClient):
+        self._c = client
+
+    def get_instruments(self, exchange, instrument_type="stock"):
+        raise NotImplementedError
+
+
+class _Universes:
+    def __init__(self, client: FreeSourceClient):
+        self._c = client
+
+    def list(self):
+        # 本地固定列表(pools._find_universe_id 按 id/name 子串匹配)
+        return [
+            {"id": "CN_Equity_A", "name": "沪深京A股"},
+            {"id": "CN_ETF", "name": "沪深ETF"},
+            {"id": "CN_Index", "name": "沪深指数"},
+            {"id": "CSI300", "name": "沪深300"},
+            {"id": "CSI500", "name": "中证500"},
+            {"id": "SSE50", "name": "上证50"},
+        ]
+
+
+class FreeSourceClient:
+    """鸭子类型 TickFlow SDK 对象(同步)。"""
+
+    def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
+        self._http = httpx.Client(transport=transport, timeout=TIMEOUT,
+                                  headers={"User-Agent": UA})
+        self.klines = _Klines(self)
+        self.quotes = _Quotes(self)
+        self.depth = _Depth(self)
+        self.financials = _Financials(self)
+        self.exchanges = _Exchanges(self)
+        self.universes = _Universes(self)
