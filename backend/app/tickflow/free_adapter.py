@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120"
 EM_REFERER = "https://quote.eastmoney.com/"
 SINA_REFERER = "https://finance.sina.com.cn"
+SINA_KLINE_REFERER = "https://finance.sina.com.cn"
 TIMEOUT = 10.0
+
+# 新浪 K 线接口的 scale 映射(period → 分钟数)。
+# 注意:scale=1(1 分钟)新浪实测返回 null,故 1m 也走 scale=5;真 1m 当日分时由 intraday() 走腾讯。
+SINA_SCALE = {"1d": 240, "1m": 5, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 
 # 交易所后缀 → 东财 secid 市场前缀
 _EXCHANGE_TO_EM_MARKET = {"SH": "1", "SZ": "0", "BJ": "0"}
@@ -58,6 +63,51 @@ def _sina_symbol(symbol: str) -> str:
     """600000.SH → sh600000。"""
     code, exch = _split_symbol(symbol)
     return f"{exch.lower()}{code}"
+
+
+def _sina_klines(http: httpx.Client, symbol: str, period: str, count: int) -> list[dict]:
+    """新浪日K/分钟K(免费源主路径,实测稳定)。
+
+    返回对齐东财 _parse_em_klines 的 8 列结构(symbol/date/open/high/low/close/volume/amount)。
+    新浪不直接给 amount,用 0 占位(下游未强依赖);date 用新浪返回的 day 字段(日K为日期、分钟K为 datetime)。
+    注意:scale=1(1分钟)新浪返回 null,故 1m 已在 SINA_SCALE 里映射到 5。
+    """
+    scale = SINA_SCALE.get(period, 240)
+    # count 转成 datalen:日K每根=1天,分钟K每根=1根。新浪按 datalen 返回最近 N 根。
+    datalen = max(int(count or 250), 1)
+    sina = _sina_symbol(symbol)
+    try:
+        r = _http_get(
+            http,
+            "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData",
+            referer=SINA_KLINE_REFERER,
+            symbol=sina, scale=scale, ma="no", datalen=datalen,
+        )
+        items = r.json()
+    except Exception as e:
+        logger.warning("sina klines %s (%s) failed: %s", symbol, period, e)
+        return []
+    if not isinstance(items, list):
+        return []
+    rows: list[dict] = []
+    for it in items:
+        day = it.get("day")
+        if not day:
+            continue
+        try:
+            rows.append({
+                "symbol": symbol,
+                "date": day,
+                "open": float(it["open"]),
+                "high": float(it["high"]),
+                "low": float(it["low"]),
+                "close": float(it["close"]),
+                "volume": float(it.get("volume") or 0),
+                "amount": 0.0,
+            })
+        except (KeyError, ValueError, TypeError):
+            continue
+    return rows
 
 
 def _sina_symbols_param(symbols: list[str]) -> str:
@@ -129,6 +179,79 @@ def _http_get(http: httpx.Client, url: str, *, referer: str = EM_REFERER, **para
     raise last
 
 
+# ---- 共享源访问(URL/referer/翻页/解码集中一处,各 sub-object 只声明用哪个源)----
+
+def _resolve_exchange(code: str, mkt: str) -> str:
+    """clist 交易所判定:北交所代码段(430/830/920)优先,否则按市场号(1=沪,0=深)。"""
+    if code.startswith(("430", "830", "920")):
+        return "BJ"
+    return "SH" if mkt == "1" else "SZ"
+
+
+def _em_clist_pages(http: httpx.Client, fs: str, fields: str, fid: str,
+                    *, pz: int = 100, max_pages: int = 200) -> list[dict]:
+    """东财 push2 clist 翻页,返回所有页的原始 diff dict 合集。
+
+    _Quotes(实时行情)与 _Exchanges(标的维表)共用:两者仅 fid 与字段消费方式不同,
+    翻页循环 / 退避 / break 条件(空页、末页不满、页数上限)在此统一。
+    r.json() 抛错时按已累计结果提前返回(与原两处内联逻辑一致)。
+    """
+    out: list[dict] = []
+    pn = 1
+    while True:
+        r = _http_get(http,
+                      "https://push2.eastmoney.com/api/qt/clist/get",
+                      referer=EM_REFERER,
+                      pn=pn, pz=pz, po=1, np=1, fltt=2, invt=2,
+                      fid=fid, fs=fs, fields=fields)
+        try:
+            data = r.json().get("data") or {}
+        except Exception:
+            break
+        diff = data.get("diff") or []
+        if not diff:
+            break
+        out.extend(diff)
+        if len(diff) < pz:
+            break
+        pn += 1
+        if pn > max_pages:
+            break
+        time.sleep(0.05)  # 翻页自我节流
+    return out
+
+
+def _sina_hq_lines(http: httpx.Client, symbols: list[str]) -> list[str]:
+    """新浪 hq_str 批量行情:抓取 + gbk 解码,返回原始行(var hq_str_xxx=...)。
+
+    _Quotes(解析成 quote)与 _Depth(取五档 parts)共用同一次抓取与解码。
+    """
+    sina_list = _sina_symbols_param(list(symbols))
+    r = _http_get(http, "http://hq.sinajs.cn/rn=0",
+                  referer=SINA_REFERER, list=sina_list)
+    return r.content.decode("gbk", errors="replace").splitlines()
+
+
+def _em_datacenter_page(http: httpx.Client, *, report: str, columns: str, filter: str,
+                        page_number: int, page_size: int,
+                        sort_columns: str, sort_types: int) -> list[dict]:
+    """东财 datacenter v1 单页取数,返回 result.data(json 解析失败→空 list)。
+
+    _Financials(单页取最新)与 _Exchanges 的 datacenter fallback(翻页)共用取数+解析,
+    URL/referer 只在此出现一次。_http_get 的异常向调用方传播(由各自决定传播还是 break)。
+    """
+    r = _http_get(http,
+                  "https://datacenter.eastmoney.com/securities/api/data/v1/get",
+                  referer="https://emweb.securities.eastmoney.com/",
+                  reportName=report, columns=columns, filter=filter,
+                  pageNumber=page_number, pageSize=page_size,
+                  sortColumns=sort_columns, sortTypes=sort_types)
+    try:
+        return (r.json().get("result") or {}).get("data") or []
+    except Exception:
+        return []
+
+
 class _Klines:
     def __init__(self, client: FreeSourceClient):
         self._c = client
@@ -153,7 +276,8 @@ class _Klines:
             })
         return rows
 
-    def _fetch_one(self, symbol, klt, count, adjust):
+    def _fetch_em(self, symbol, klt, count, adjust) -> list[dict]:
+        """东财 push2his 主路径(部分网络环境被针对 RST,作为可失败的首选)。"""
         secid = _symbol_to_secid(symbol)
         # fqt: 0=不复权 1=前复权 2=后复权
         # 关键(免费源复权语义):本 adapter 的 ex_factors() 恒返回空 dict,
@@ -180,6 +304,23 @@ class _Klines:
         except Exception:
             klines = []
         return self._parse_em_klines(klines, symbol)
+
+    def _fetch_one(self, symbol, klt, count, adjust) -> list[dict]:
+        """K 线拉取:东财 push2his 主用,失败(RST/502 等)→ 新浪 fallback。
+
+        新浪日K(scale=240)与分钟K(scale≥5)实测稳定,作为 push2his 被网络阻断时的替补。
+        注意新浪 1 分钟(scale=1)返回 null,1m 已在 SINA_SCALE 映射到 5m。
+        """
+        # period by klt:101→1d, 1→1m, 5→5m, 15/30/60 同名
+        period = {101: "1d", 1: "1m", 5: "5m", 15: "15m", 30: "30m", 60: "60m"}.get(klt, "1d")
+        try:
+            rows = self._fetch_em(symbol, klt, count, adjust)
+            if rows:
+                return rows
+        except Exception as e:
+            logger.warning("free klines EM %s failed, fallback to SINA: %s", symbol, e)
+        # 东财失败或空 → 新浪
+        return _sina_klines(self._c._http, symbol, period, count)
 
     def batch(self, symbols, period="1d", count=250, adjust="none",
               start_time=None, end_time=None, as_dataframe=True, show_progress=False):
@@ -313,13 +454,8 @@ class _Quotes:
         }
 
     def _fetch_sina(self, symbols: list[str]) -> list[dict]:
-        sina_list = _sina_symbols_param(symbols)
-        r = _http_get(self._c._http,
-                      "http://hq.sinajs.cn/rn=0",
-                      referer=SINA_REFERER, list=sina_list)
-        text = r.content.decode("gbk", errors="replace")
         out = []
-        for line in text.splitlines():
+        for line in _sina_hq_lines(self._c._http, symbols):
             q = self._parse_sina_line(line)
             if q:
                 out.append(q)
@@ -365,65 +501,31 @@ class _Quotes:
     def _fetch_em_clist(self, fs: str, fields: str) -> list[dict]:
         """东财 clist 实时行情 → SDK quote dict。"""
         out = []
-        pn = 1
-        pz = 100
-        while True:
-            r = _http_get(self._c._http,
-                          "https://push2.eastmoney.com/api/qt/clist/get",
-                          referer=EM_REFERER,
-                          pn=pn, pz=pz, po=1, np=1, fltt=2, invt=2,
-                          fid="f3", fs=fs, fields=fields)
-            try:
-                data = r.json().get("data") or {}
-            except Exception:
-                break
-            diff = data.get("diff") or []
-            if not diff:
-                break
-            for d in diff:
-                code = str(d.get("f12") or "")
-                if not code:
-                    continue
-                mkt = str(d.get("f13") or "")
-                if code.startswith(("430", "830", "920")):
-                    sym_ex = "BJ"
-                else:
-                    sym_ex = "SH" if mkt == "1" else "SZ"
-                last = _f(d, "f2")
-                change_pct = _f(d, "f3")
-                change_amount = _f(d, "f4")
-                volume = _f(d, "f5")
-                amount = _f(d, "f6")
-                high = _f(d, "f15")
-                low = _f(d, "f16")
-                open_p = _f(d, "f17")
-                prev_close = _f(d, "f18")
-                out.append({
-                    "symbol": f"{code}.{sym_ex}",
+        for d in _em_clist_pages(self._c._http, fs, fields, fid="f3"):
+            code = str(d.get("f12") or "")
+            if not code:
+                continue
+            sym_ex = _resolve_exchange(code, str(d.get("f13") or ""))
+            out.append({
+                "symbol": f"{code}.{sym_ex}",
+                "name": d.get("f14") or code,
+                "last_price": _f(d, "f2"),
+                "prev_close": _f(d, "f18"),
+                "open": _f(d, "f17"),
+                "high": _f(d, "f15"),
+                "low": _f(d, "f16"),
+                "volume": _f(d, "f5"),
+                "amount": _f(d, "f6"),
+                "timestamp": None,
+                "session": "regular",
+                "ext": {
                     "name": d.get("f14") or code,
-                    "last_price": last,
-                    "prev_close": prev_close,
-                    "open": open_p,
-                    "high": high,
-                    "low": low,
-                    "volume": volume,
-                    "amount": amount,
-                    "timestamp": None,
-                    "session": "regular",
-                    "ext": {
-                        "name": d.get("f14") or code,
-                        "change_amount": change_amount,
-                        "change_pct": change_pct,
-                        "turnover_rate": None,
-                        "amplitude": None,
-                    },
-                })
-            if len(diff) < pz:
-                break
-            pn += 1
-            if pn > 200:
-                break
-            time.sleep(0.05)
+                    "change_amount": _f(d, "f4"),
+                    "change_pct": _f(d, "f3"),
+                    "turnover_rate": None,
+                    "amplitude": None,
+                },
+            })
         return out
 
 
@@ -433,12 +535,8 @@ class _Depth:
 
     def batch(self, symbols):
         # 复用 quotes 的新浪解析,五档在行情串 parts 10~29
-        sina_list = _sina_symbols_param(list(symbols))
-        r = _http_get(self._c._http, "http://hq.sinajs.cn/rn=0",
-                      referer=SINA_REFERER, list=sina_list)
-        text = r.content.decode("gbk", errors="replace")
         out: dict = {}
-        for line in text.splitlines():
+        for line in _sina_hq_lines(self._c._http, list(symbols)):
             parsed = _Quotes._parse_sina_line(line)
             if not parsed:
                 continue
@@ -535,15 +633,12 @@ class _Financials:
             if i > 0:
                 time.sleep(0.05)
             code, _ = _split_symbol(sym)
-            r = _http_get(self._c._http,
-                          "https://datacenter.eastmoney.com/securities/api/data/v1/get",
-                          referer="https://emweb.securities.eastmoney.com/",
-                          reportName=report, columns="ALL",
-                          filter=f'(SECURITY_CODE="{code}")',
-                          pageNumber=1, pageSize=2 if latest else 50,
-                          sortColumns="REPORT_DATE", sortTypes=-1)
             try:
-                rows = (r.json().get("result") or {}).get("data") or []
+                rows = _em_datacenter_page(
+                    self._c._http, report=report, columns="ALL",
+                    filter=f'(SECURITY_CODE="{code}")',
+                    page_number=1, page_size=2 if latest else 50,
+                    sort_columns="REPORT_DATE", sort_types=-1)
             except Exception:
                 rows = []
             # 每条 record 上补三样东西(原始东财键全部保留,供 AI 整体喂 LLM):
@@ -599,53 +694,103 @@ class _Exchanges:
         #  listing_date/limit_up clist 不提供,置 None,下游按缺省处理)
         fields = "f12,f13,f14,f38,f39"
         out: list[dict] = []
+        try:
+            out = self._clist_instruments(fs, fields, instrument_type)
+        except Exception as e:
+            logger.warning("free instruments EM clist %s/%s failed, fallback to datacenter: %s",
+                           exchange, instrument_type, e)
+            out = []
+        if out:
+            return out
+        # push2 clist 不可用(502/RST)→ datacenter 标的列表(同源,字段降级:无股本)
+        return self._datacenter_instruments(ex, instrument_type)
+
+    def _clist_instruments(self, fs, fields, instrument_type) -> list[dict]:
+        """东财 push2 clist(主,提供股本)。"""
+        out: list[dict] = []
+        for d in _em_clist_pages(self._c._http, fs, fields, fid="f12"):
+            code = str(d.get("f12") or "")
+            if not code:
+                continue
+            # f13 是市场代码(1=沪,0=深),用于精确判交易所;BJ 代码段单独识别
+            sym_ex = _resolve_exchange(code, str(d.get("f13") or ""))
+            out.append({
+                "symbol": f"{code}.{sym_ex}",
+                "name": d.get("f14") or code,
+                "code": code,
+                "exchange": sym_ex,
+                "region": "CN",
+                "type": instrument_type,
+                "ext": {
+                    "total_shares": _f(d, "f38"),
+                    "float_shares": _f(d, "f39"),
+                    "listing_date": None,
+                    "tick_size": None,
+                    "limit_up": None,
+                    "limit_down": None,
+                },
+            })
+        return out
+
+    def _datacenter_instruments(self, ex: str, instrument_type: str) -> list[dict]:
+        """东财 datacenter 标的列表(push2 clist 的 fallback,同源可通,字段降级)。
+
+        reportName=RPT_F10_ORG_BASICINFO;按 TRADE_MARKET_CODE / SECURITY_TYPE 过滤。
+        无 total_shares/float_shares(置 None,strategy 市值过滤将按缺省跳过)。
+        """
+        if instrument_type != "stock":
+            return []  # index/etf 维表来源少,clist 失败时返回空,后续重试
+        market_filter = {
+            "SH": 'TRADE_MARKET_CODE="069001001001"',  # 沪主板
+            "SZ": 'TRADE_MARKET_CODE="069001002001"',  # 深主板
+        }.get(ex)
+        if not market_filter:
+            return []
+        out: list[dict] = []
         pn = 1
-        pz = 100
+        pz = 200
         while True:
-            r = _http_get(self._c._http,
-                          "https://push2.eastmoney.com/api/qt/clist/get",
-                          referer=EM_REFERER,
-                          pn=pn, pz=pz, po=1, np=1, fltt=2, invt=2,
-                          fid="f12", fs=fs, fields=fields)
             try:
-                data = r.json().get("data") or {}
+                data = _em_datacenter_page(
+                    self._c._http,
+                    report="RPT_F10_ORG_BASICINFO",
+                    columns="SECUCODE,SECURITY_CODE,SECURITY_NAME_ABBR,LISTING_DATE",
+                    filter=market_filter, page_number=pn, page_size=pz,
+                    sort_columns="SECURITY_CODE", sort_types=1)
             except Exception:
                 break
-            diff = data.get("diff") or []
-            if not diff:
+            if not data:
                 break
-            for d in diff:
-                code = str(d.get("f12") or "")
+            for d in data:
+                secucode = str(d.get("SECUCODE") or "")
+                code = str(d.get("SECURITY_CODE") or "")
                 if not code:
                     continue
-                # f13 是市场代码(1=沪,0=深),用于精确判交易所;BJ 代码段单独识别
-                mkt = str(d.get("f13") or "")
-                if code.startswith(("430", "830", "920")):
-                    sym_ex = "BJ"
-                else:
-                    sym_ex = "SH" if mkt == "1" else "SZ"
+                # SECUCODE 形如 600000.SH / 000001.SZ / 430047.BJ,直接取后缀
+                sym_ex = secucode.rsplit(".", 1)[-1] if "." in secucode else ex
+                listing = d.get("LISTING_DATE")
                 out.append({
                     "symbol": f"{code}.{sym_ex}",
-                    "name": d.get("f14") or code,
+                    "name": d.get("SECURITY_NAME_ABBR") or code,
                     "code": code,
                     "exchange": sym_ex,
                     "region": "CN",
                     "type": instrument_type,
                     "ext": {
-                        "total_shares": _f(d, "f38"),
-                        "float_shares": _f(d, "f39"),
-                        "listing_date": None,
+                        "total_shares": None,
+                        "float_shares": None,
+                        "listing_date": str(listing)[:10] if listing else None,
                         "tick_size": None,
                         "limit_up": None,
                         "limit_down": None,
                     },
                 })
-            if len(diff) < pz:
+            if len(data) < pz:
                 break
             pn += 1
-            if pn > 200:  # 安全上限
+            if pn > 100:
                 break
-            time.sleep(0.05)  # 翻页自我节流
+            time.sleep(0.05)
         return out
 
 
