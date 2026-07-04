@@ -30,7 +30,19 @@ FINANCIAL_TABLES = ("metrics", "income", "balance_sheet", "cash_flow")
 # ================================================================
 
 def _get_symbols(data_dir: Path) -> list[str]:
-    """从 instruments 表获取标的列表。"""
+    """财务同步的标的范围。
+
+    免费源模式(data_backend=free_source): 东财 datacenter 的财务接口只能逐只查
+    (filter=(SECURITY_CODE="xx")),全市场 5000+ 只 x 4 张表 = 2 万+ 串行请求,
+    数十分钟且极易被限流。免费源场景下收窄到自选池——财务分析本就只看关注的几十只。
+    付费模式(SDK 一次可传 100 只)不受影响,仍同步全市场 instruments。
+    """
+    from app import secrets_store
+
+    if secrets_store.get_data_backend() == "free_source":
+        from app.services import watchlist
+        return [row["symbol"] for row in watchlist.list_symbols() if row.get("symbol")]
+
     inst_path = data_dir / "instruments" / "instruments.parquet"
     if not inst_path.exists():
         return []
