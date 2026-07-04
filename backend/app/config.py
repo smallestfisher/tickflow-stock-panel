@@ -92,6 +92,10 @@ class Settings(BaseSettings):
         "Chrome/131.0.0.0 Safari/537.36"
     )
 
+    # Telegram Bot — 远程操作/推送。token 敏感, 运行时优先读 secrets.json;
+    # 此处仅作 .env 兜底(TELEGRAM_BOT_TOKEN)。留空 = 不启用。
+    telegram_bot_token: str = ""
+
     # Server
     host: str = "0.0.0.0"
     port: int = 3018

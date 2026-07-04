@@ -15,6 +15,7 @@ import {
   Save,
   Check,
   HelpCircle,
+  Database,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useCapabilities, useSettings } from '@/lib/useSharedQueries'
@@ -64,7 +65,17 @@ export function SettingsKeysPanel() {
     },
   })
 
+  const switchBackend = useMutation({
+    mutationFn: (backend: 'tickflow' | 'free_source') => api.setDataBackend(backend),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.settings })
+      qc.invalidateQueries({ queryKey: QK.capabilities })
+    },
+  })
+
   const mode = settings.data?.mode
+  const dataBackend = settings.data?.data_backend ?? 'tickflow'
+  const freeSource = dataBackend === 'free_source'
   const masked = settings.data?.tickflow_api_key_masked
   const capCount = caps.data ? Object.keys(caps.data.capabilities).length : 0
 
@@ -198,6 +209,47 @@ export function SettingsKeysPanel() {
                 <CheckCircle2 className="h-3 w-3" />
                 保存成功 — 档位 {save.data.tier_label}
                 {save.data.mode === 'free' && '(免费档 · 历史日K + 自选实时监控)'}
+              </div>
+            )}
+          </Card>
+
+          {/* 数据源切换 */}
+          <Card icon={Database} title="数据源">
+            <p className="text-sm text-secondary leading-relaxed mb-4">
+              选择行情与财务数据的来源。TickFlow 按 Key 档位提供完整能力;免费公开源无需 Key,从东财/新浪/腾讯的公开接口获取数据。
+            </p>
+
+            <div className="space-y-2">
+              <BackendOption
+                active={!freeSource}
+                disabled={switchBackend.isPending}
+                onClick={() => { if (freeSource) switchBackend.mutate('tickflow') }}
+                title="TickFlow"
+                desc="官方数据源,按 API Key 档位启用实时行情、分钟K、财务等能力。"
+              />
+              <BackendOption
+                active={freeSource}
+                disabled={switchBackend.isPending}
+                onClick={() => { if (!freeSource) switchBackend.mutate('free_source') }}
+                title="免费公开源"
+                desc="东财/新浪/腾讯公开接口,无需 Key。日K/实时/五档/财务/板块全可用,受公开源限速。"
+              />
+            </div>
+
+            {switchBackend.isPending && (
+              <div className="mt-3 flex items-center gap-1.5 text-xs text-warning">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                切换中 — 正在重置客户端并重新检测能力…
+              </div>
+            )}
+            {switchBackend.isError && (
+              <div className="mt-3 text-xs text-danger">
+                切换失败:{String((switchBackend.error as any).message)}
+              </div>
+            )}
+            {freeSource && !switchBackend.isPending && (
+              <div className="mt-3 rounded-btn border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-[11px] leading-snug text-warning">
+                免费源为公开接口,复权仅支持前复权、分钟K不复权,稳定性与限速受第三方约束,请留意数据口径差异。
               </div>
             )}
           </Card>
@@ -435,5 +487,36 @@ function Card({ icon: Icon, title, badge, right, children }: CardProps) {
       </div>
       {children}
     </section>
+  )
+}
+
+// ===== 数据源选项 =====
+
+interface BackendOptionProps {
+  active: boolean
+  disabled?: boolean
+  onClick: () => void
+  title: string
+  desc: string
+}
+
+function BackendOption({ active, disabled, onClick, title, desc }: BackendOptionProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`w-full text-left rounded-btn border px-3 py-2.5 transition-colors duration-150 ease-smooth disabled:opacity-60 disabled:cursor-not-allowed ${
+        active
+          ? 'border-accent bg-accent/10'
+          : 'border-border bg-base hover:bg-elevated'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-foreground">{title}</span>
+        {active && <CheckCircle2 className="h-4 w-4 text-accent shrink-0" />}
+      </div>
+      <div className="mt-0.5 text-[11px] text-muted">{desc}</div>
+    </button>
   )
 }

@@ -161,6 +161,18 @@ async def lifespan(app: FastAPI):
         logger.warning("monitor engine load failed: %s", e)
     app.state.monitor_engine = monitor_engine
 
+    # Telegram 机器人: 收命令的 long-polling 服务 (推送不依赖它, 独立运行)。
+    # 未启用 / 无 token 时 start() 内部跳过, 不影响启动。
+    try:
+        from app.services.telegram_bot import TelegramBotService
+        telegram_bot = TelegramBotService()
+        telegram_bot.set_app_state(app.state)
+        telegram_bot.start()
+        app.state.telegram_bot = telegram_bot
+    except Exception as e:  # noqa: BLE001
+        logger.warning("telegram bot not started: %s", e)
+        app.state.telegram_bot = None
+
     yield
 
     if app.state.scheduler:
@@ -177,6 +189,9 @@ async def lifespan(app: FastAPI):
     dsvc = getattr(app.state, "depth_service", None)
     if dsvc:
         dsvc.stop_polling()
+    tbot = getattr(app.state, "telegram_bot", None)
+    if tbot:
+        tbot.stop()
     logger.info("shutdown")
 
 

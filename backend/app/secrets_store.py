@@ -78,6 +78,18 @@ def get_ai_key() -> str:
     return settings.ai_api_key or ""
 
 
+def get_telegram_token() -> str:
+    """取 Telegram Bot token:secrets.json 优先,否则 .env(TELEGRAM_BOT_TOKEN)。
+
+    token 是敏感凭据, 与 API Key 同级, 故存 secrets.json(0600)。
+    """
+    val = load().get("telegram_bot_token")
+    if val:
+        return val
+    from app.config import settings
+    return getattr(settings, "telegram_bot_token", "") or ""
+
+
 def get_ai_config(key: str, default: str = "") -> str:
     """取 AI 配置项:secrets.json 优先,否则 config。"""
     val = load().get(key)

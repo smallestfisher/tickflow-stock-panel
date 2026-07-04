@@ -79,6 +79,11 @@ def get_settings() -> dict:
         "ai_codex_command": current_codex_command(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
         "ai_live_search": secrets_store.get_ai_live_search(),
+        # Telegram 机器人 (token 脱敏; 白名单 / 开关明文)
+        "telegram_has_token": bool(secrets_store.get_telegram_token()),
+        "telegram_token_masked": secrets_store.mask(secrets_store.get_telegram_token()),
+        "telegram_enabled": preferences.get_telegram_enabled(),
+        "telegram_allowed_chat_ids": preferences.get_telegram_allowed_chat_ids(),
     }
 
 
@@ -671,6 +676,94 @@ def update_feishu_webhook(req: FeishuWebhookPrefsIn) -> dict:
     saved_url = preferences.set_feishu_webhook_url(url)
     saved_secret = preferences.set_feishu_webhook_secret((req.secret or "").strip())
     return {"feishu_webhook_url": saved_url, "feishu_webhook_secret": saved_secret}
+
+
+# ===== Telegram 机器人 =====
+
+class TelegramConfigIn(BaseModel):
+    # token: None 表示不改动(保留已存); 空串表示清空; 非空则校验并保存。
+    token: str | None = None
+    enabled: bool | None = None
+    allowed_chat_ids: list[str] | None = None
+
+
+@router.put("/telegram")
+def update_telegram(req: TelegramConfigIn, request: Request) -> dict:
+    """保存 Telegram 机器人配置并按需重启轮询。
+
+    - token: None=不动, ""=清空, 非空=先 getMe 校验有效性再存(无效则 400)。
+    - enabled: 机器人「收命令」总开关(推送不依赖它)。
+    - allowed_chat_ids: 授权白名单(单用户通常一个)。
+    改动后重启轮询服务, 使 token/开关即时生效。
+    """
+    from app import secrets_store
+    from app.services import preferences, telegram_adapter
+
+    bot_info: dict | None = None
+    # token 处理
+    if req.token is not None:
+        token = req.token.strip()
+        if token:
+            bot_info = telegram_adapter.get_me(token)
+            if bot_info is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Telegram Bot token 无效或无法连接 (请检查 token 与网络出网)",
+                )
+            secrets_store.save({"telegram_bot_token": token})
+        else:
+            secrets_store.clear("telegram_bot_token")
+
+    if req.enabled is not None:
+        preferences.set_telegram_enabled(req.enabled)
+    if req.allowed_chat_ids is not None:
+        preferences.set_telegram_allowed_chat_ids(req.allowed_chat_ids)
+
+    # 重启轮询, 使配置即时生效
+    tbot = getattr(request.app.state, "telegram_bot", None)
+    running = False
+    if tbot is not None:
+        try:
+            running = tbot.restart()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("telegram bot restart failed: %s", e)
+
+    token_now = secrets_store.get_telegram_token()
+    return {
+        "ok": True,
+        "telegram_enabled": preferences.get_telegram_enabled(),
+        "telegram_has_token": bool(token_now),
+        "telegram_token_masked": secrets_store.mask(token_now),
+        "telegram_allowed_chat_ids": preferences.get_telegram_allowed_chat_ids(),
+        "telegram_bot_username": (bot_info or {}).get("username", ""),
+        "telegram_running": running,
+    }
+
+
+@router.get("/telegram/discover-chat")
+def discover_telegram_chat() -> dict:
+    """拉取机器人近期收到的消息, 列出出现过的 chat_id 供用户一键授权。
+
+    使用场景: 用户给机器人发一条消息后点「发现我的 chat_id」, 无需手动查。
+    注意: 与轮询服务读同一 getUpdates, 若轮询在跑可能已消费掉更新, 此处尽力而为。
+    """
+    from app import secrets_store
+    from app.services import telegram_adapter
+
+    token = secrets_store.get_telegram_token()
+    if not token:
+        raise HTTPException(status_code=400, detail="请先配置 Telegram Bot token")
+    updates = telegram_adapter.get_updates(token, offset=None, timeout=0)
+    chats: dict[str, str] = {}
+    for upd in updates or []:
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        chat = msg.get("chat") or {}
+        cid = chat.get("id")
+        if cid is None:
+            continue
+        label = chat.get("username") or chat.get("first_name") or chat.get("title") or ""
+        chats[str(cid)] = label
+    return {"chats": [{"chat_id": k, "label": v} for k, v in chats.items()]}
 
 
 class WebhookEnabledDefaultIn(BaseModel):

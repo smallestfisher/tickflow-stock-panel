@@ -740,6 +740,7 @@ class QuoteService:
             # 紧随系统通知, 同样静默降级不阻断主流程。
             if rule_events:
                 self._maybe_send_webhook(rule_events, engine)
+                self._maybe_send_telegram(rule_events, engine)
 
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
@@ -824,6 +825,42 @@ class QuoteService:
                 logger.info("飞书 Webhook 推送: %d 条", pushed)
         except Exception as e:  # noqa: BLE001
             logger.debug("Webhook 推送异常 (不影响告警主流程): %s", e)
+
+    def _maybe_send_telegram(self, rule_events: list[dict], engine) -> None:
+        """把告警推送到 Telegram(由规则 webhook_enabled 开关控制, 与飞书共用该开关)。
+
+        - 未配置 token / 无授权 chat_id: 直接返回(broadcast 内部判断)
+        - 仅推送 webhook_enabled=True 的规则触发的告警(复用飞书那套规则开关)
+        - 失败静默, 不阻断主流程; 去重复用 MonitorRuleEngine 的 cooldown
+        """
+        try:
+            from app.services import telegram_adapter
+
+            source_labels = {
+                "strategy": "策略", "signal": "信号",
+                "price": "价格", "market": "异动",
+            }
+            rules = engine.rules if engine is not None else {}
+            lines: list[str] = []
+            for ev in rule_events:
+                rule = rules.get(ev.get("rule_id"))
+                if not rule or not rule.get("webhook_enabled"):
+                    continue
+                source = ev.get("source", "")
+                source_label = source_labels.get(source, source or "通知")
+                symbol = ev.get("symbol") or ""
+                name = ev.get("name") or ""
+                message = ev.get("message") or ""
+                body = f"{symbol} {name} {message}".strip() if symbol else (message or name)
+                lines.append(f"[{source_label}] {body}".strip())
+            if not lines:
+                return
+            text = "🔔 <b>TickFlow 告警</b>\n" + "\n".join(lines)
+            sent = telegram_adapter.broadcast(text)
+            if sent:
+                logger.info("Telegram 告警推送: %d 个会话", sent)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Telegram 推送异常 (不影响告警主流程): %s", e)
 
     def _maybe_send_system_notifications(self, all_alerts: list[dict]) -> None:
         """把告警转发到操作系统通知中心 (由 preferences 开关控制)。

@@ -714,6 +714,11 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                     url, "TickFlow · 每日复盘", subtitle, content, secret
                 )
                 logger.info("review push(feishu) %s", "sent" if ok else "failed")
+            elif ch == "telegram":
+                from app.services import telegram_adapter
+                title = f"📈 <b>TickFlow · 每日复盘</b>\n{subtitle}".strip()
+                sent = telegram_adapter.broadcast(f"{title}\n\n{content}")
+                logger.info("review push(telegram) %d 会话", sent)
             # 未来更多渠道在此追加分支
     except Exception as e:  # noqa: BLE001
         logger.warning("review push error: %s", e)

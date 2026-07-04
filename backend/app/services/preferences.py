@@ -267,7 +267,7 @@ def set_depth_finalize_time(hour: int, minute: int) -> dict:
 
 # 复盘推送可选渠道白名单 (微信等暂未实现, 不在白名单内, 前端仅作占位)
 # 多选: 不推送 = 空数组, 而非 'none'
-REVIEW_PUSH_CHANNELS = {"feishu"}
+REVIEW_PUSH_CHANNELS = {"feishu", "telegram"}
 
 
 def get_review_schedule() -> dict:
@@ -456,6 +456,51 @@ def set_feishu_webhook_secret(secret: str) -> str:
     """保存飞书签名密钥。传入空串表示不验签。"""
     save({"feishu_webhook_secret": str(secret or "").strip()})
     return get_feishu_webhook_secret()
+
+
+# ===== Telegram 机器人 =====
+# token 存 secrets.json(敏感), 此处只存「是否启用」+「授权 chat_id 白名单」。
+# 白名单为空 = 未授权任何人, 机器人只回显 chat_id 供用户填入, 不执行任何命令。
+
+
+def get_telegram_enabled() -> bool:
+    """Telegram 机器人总开关(是否启动 long-polling 收命令)。默认关闭。
+
+    注意: 推送(告警/复盘)只要求 token + chat_id 已配置即可, 不依赖此开关;
+    此开关仅控制「主动收命令」的轮询服务是否运行。
+    """
+    return bool(load().get("telegram_enabled", False))
+
+
+def set_telegram_enabled(enabled: bool) -> bool:
+    """保存 Telegram 机器人总开关。"""
+    save({"telegram_enabled": bool(enabled)})
+    return bool(enabled)
+
+
+def get_telegram_allowed_chat_ids() -> list[str]:
+    """授权的 chat_id 白名单(字符串列表)。空列表 = 未授权任何人。
+
+    单用户场景通常只有一个 chat_id; 用列表以便未来多设备/多人。
+    """
+    raw = load().get("telegram_allowed_chat_ids", [])
+    if isinstance(raw, str):
+        import re
+        raw = [s.strip() for s in re.split(r"[,\s]+", raw) if s.strip()]
+    return [str(c).strip() for c in (raw or []) if str(c).strip()]
+
+
+def set_telegram_allowed_chat_ids(chat_ids: list[str]) -> list[str]:
+    """保存授权 chat_id 白名单。去重、保序、转字符串。"""
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for c in chat_ids or []:
+        cid = str(c).strip()
+        if cid and cid not in seen:
+            seen.add(cid)
+            cleaned.append(cid)
+    save({"telegram_allowed_chat_ids": cleaned})
+    return cleaned
 
 
 def get_webhook_enabled_default() -> bool:

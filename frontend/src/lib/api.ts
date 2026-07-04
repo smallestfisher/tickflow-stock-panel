@@ -639,9 +639,11 @@ export interface EndpointManifest {
 }
 
 export interface SettingsState {
-  mode: 'none' | 'free' | 'api_key'
+  mode: 'none' | 'free' | 'api_key' | 'free_source'
   tickflow_api_key_masked: string
   has_tickflow_key: boolean
+  /** 数据后端: tickflow(默认) / free_source(免费公开源 adapter) */
+  data_backend: 'tickflow' | 'free_source'
   tier_label: string
   current_endpoint: string
   probe_log: string[]
@@ -659,6 +661,11 @@ export interface SettingsState {
   ai_codex_command?: string
   ai_user_agent: string
   ai_live_search?: boolean
+  // Telegram 机器人
+  telegram_has_token?: boolean
+  telegram_token_masked?: string
+  telegram_enabled?: boolean
+  telegram_allowed_chat_ids?: string[]
 }
 
 /** 保存 TickFlow Key 的响应(先探后存) */
@@ -761,6 +768,19 @@ export const api = {
     }),
   clearTickflowKey: () =>
     request<any>('/api/settings/tickflow-key', { method: 'DELETE' }),
+
+  /** 切换数据后端: tickflow(默认) / free_source(免费公开源 adapter) */
+  setDataBackend: (backend: 'tickflow' | 'free_source') =>
+    request<{
+      data_backend: 'tickflow' | 'free_source'
+      mode: SettingsState['mode']
+      tier_label: string
+      current_endpoint: string
+      capabilities: Record<string, unknown>
+    }>('/api/settings/data-backend', {
+      method: 'POST',
+      body: JSON.stringify({ backend }),
+    }),
 
   /** 标记首次使用向导完成（持久化到后端 preferences） */
   completeOnboarding: () =>
@@ -870,6 +890,24 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ url, secret }),
     }),
+  updateTelegram: (cfg: { token?: string; enabled?: boolean; allowed_chat_ids?: string[] }) =>
+    request<{
+      ok: boolean
+      telegram_enabled: boolean
+      telegram_has_token: boolean
+      telegram_token_masked: string
+      telegram_allowed_chat_ids: string[]
+      telegram_bot_username: string
+      telegram_running: boolean
+    }>('/api/settings/telegram', {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
+  discoverTelegramChat: () =>
+    request<{ chats: { chat_id: string; label: string }[] }>(
+      '/api/settings/telegram/discover-chat',
+    ),
+
   updateWebhookDefault: (enabled: boolean) =>
     request<{ webhook_enabled_default: boolean }>('/api/settings/preferences/webhook-enabled-default', {
       method: 'PUT',
