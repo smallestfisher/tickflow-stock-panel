@@ -29,6 +29,10 @@ TIMEOUT = 10.0
 # 注意:scale=1(1 分钟)新浪实测返回 null,故 1m 也走 scale=5;真 1m 当日分时由 intraday() 走腾讯。
 SINA_SCALE = {"1d": 240, "1m": 5, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 
+# 东财 push2his 日K/分钟K 会话级熔断阈值:某些网络环境对 push2his 稳定 RST,
+# 连续失败达此次数后本进程内标记东财不可用、剩余标的直接走新浪,避免每只白重试。
+_EM_KLINE_TRIP_THRESHOLD = 3
+
 # 交易所后缀 → 东财 secid 市场前缀
 _EXCHANGE_TO_EM_MARKET = {"SH": "1", "SZ": "0", "BJ": "0"}
 _EM_MARKET_TO_EXCHANGE = {"1": "SH", "0": "SZ"}  # BJ 与 SZ 同为 0,反查时按代码段区分
@@ -255,6 +259,9 @@ def _em_datacenter_page(http: httpx.Client, *, report: str, columns: str, filter
 class _Klines:
     def __init__(self, client: FreeSourceClient):
         self._c = client
+        # 会话级熔断:东财 push2his 连续失败达阈值后本进程不再试探,剩余标的直接走新浪。
+        self._em_tripped = False
+        self._em_fail_streak = 0
 
     @staticmethod
     def _parse_em_klines(klines: list[str], symbol: str) -> list[dict]:
@@ -313,13 +320,24 @@ class _Klines:
         """
         # period by klt:101→1d, 1→1m, 5→5m, 15/30/60 同名
         period = {101: "1d", 1: "1m", 5: "5m", 15: "15m", 30: "30m", 60: "60m"}.get(klt, "1d")
-        try:
-            rows = self._fetch_em(symbol, klt, count, adjust)
-            if rows:
-                return rows
-        except Exception as e:
-            logger.warning("free klines EM %s failed, fallback to SINA: %s", symbol, e)
-        # 东财失败或空 → 新浪
+        # 会话级熔断:东财已被判定不可用(连续失败达阈值)时,直接走新浪,
+        # 跳过注定失败的 push2his 试探(每只省下 3 次重试 + 退避 ≈ 2s)。
+        if not self._em_tripped:
+            try:
+                rows = self._fetch_em(symbol, klt, count, adjust)
+                if rows:
+                    self._em_fail_streak = 0  # 成功 → 清零连续失败
+                    return rows
+            except Exception as e:
+                self._em_fail_streak += 1
+                if self._em_fail_streak >= _EM_KLINE_TRIP_THRESHOLD:
+                    self._em_tripped = True
+                    logger.warning(
+                        "free klines EM 连续失败 %d 次,本会话改用新浪(重启进程后重试东财)",
+                        self._em_fail_streak)
+                else:
+                    logger.warning("free klines EM %s failed, fallback to SINA: %s", symbol, e)
+        # 东财熔断 / 失败 / 空 → 新浪
         return _sina_klines(self._c._http, symbol, period, count)
 
     def batch(self, symbols, period="1d", count=250, adjust="none",
