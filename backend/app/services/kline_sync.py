@@ -362,20 +362,27 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     }
     df = df.rename({k: v for k, v in rename_map.items() if k in df.columns})
 
-    # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
+    # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time/trade_date;
+    # 免费源(free_adapter)分钟K与日K共用 _parse_em_klines,列名是 date
+    # (值形如 "2026-07-03 09:35" 的字符串),故也认 date。
     if "timestamp" in df.columns:
         df = df.with_columns(
             pl.from_epoch("timestamp", time_unit="ms").alias("datetime"),
         ).drop("timestamp")
-        for drop_col in ("trade_time", "trade_date"):
+        for drop_col in ("trade_time", "trade_date", "date"):
             if drop_col in df.columns:
                 df = df.drop(drop_col)
     elif "trade_time" in df.columns:
         df = df.rename({"trade_time": "datetime"})
-        if "trade_date" in df.columns:
-            df = df.drop("trade_date")
+        for drop_col in ("trade_date", "date"):
+            if drop_col in df.columns:
+                df = df.drop(drop_col)
     elif "trade_date" in df.columns:
         df = df.rename({"trade_date": "datetime"})
+        if "date" in df.columns:
+            df = df.drop("date")
+    elif "date" in df.columns:
+        df = df.rename({"date": "datetime"})
 
     if "symbol" not in df.columns and default_symbol is not None:
         df = df.with_columns(pl.lit(default_symbol).alias("symbol"))
@@ -383,7 +390,17 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # 类型规范:统一转 Datetime('us')
     if "datetime" in df.columns:
         dt_type = df.schema["datetime"]
-        if not isinstance(dt_type, pl.Datetime) or dt_type.time_unit != "us":
+        if dt_type == pl.String:
+            # 字符串时间戳(如 free_source 分钟K "2026-07-03 09:35")必须用 str.to_datetime
+            # 解析;直接 cast(Datetime) 会得到 null。无秒/有秒两种格式都能推断。
+            # 时区对齐:付费 SDK 走 timestamp(int ms) → from_epoch 存 UTC naive,
+            # 前端 fmtTime 统一 +8 还原北京时间。免费源字符串是北京时间(仅此分支到达),
+            # 故解析后减 8h 存成 UTC naive,与付费约定一致,前端 +8 逻辑与付费路径都不动。
+            df = df.with_columns(
+                pl.col("datetime").str.to_datetime(time_unit="us", strict=False)
+                .dt.offset_by("-8h").alias("datetime")
+            )
+        elif not isinstance(dt_type, pl.Datetime) or dt_type.time_unit != "us":
             df = df.with_columns(pl.col("datetime").cast(pl.Datetime("us"), strict=False))
 
     for col in ("open", "high", "low", "close"):
@@ -481,10 +498,17 @@ def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
 
     if isinstance(raw, dict):
         sub = raw.get(symbol)
-        return _normalize_minute(sub) if sub is not None and len(sub) > 0 else pl.DataFrame()
-    if raw is not None and len(raw) > 0:
-        return _normalize_minute(raw)
-    return pl.DataFrame()
+        df = _normalize_minute(sub) if sub is not None and len(sub) > 0 else pl.DataFrame()
+    elif raw is not None and len(raw) > 0:
+        df = _normalize_minute(raw)
+    else:
+        df = pl.DataFrame()
+    # 免费源(free_adapter)分钟K无视 start_time/end_time,按 count 返回最近 N 根(可跨多日);
+    # 单日视图只保留 trade_date 当天。datetime 存 UTC naive(北京-8h),但 A股交易时段
+    # (北京 09:30–15:00 → UTC 01:30–07:00)不跨午夜,故按日历日过滤与北京同日一致。
+    if not df.is_empty() and "datetime" in df.columns:
+        df = df.filter(pl.col("datetime").dt.date() == trade_date)
+    return df
 
 
 def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
