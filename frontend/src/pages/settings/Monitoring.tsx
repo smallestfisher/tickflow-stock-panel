@@ -10,6 +10,7 @@ import {
   Webhook,
   ChevronDown,
   Send,
+  Newspaper,
 } from 'lucide-react'
 import {
   usePreferences,
@@ -459,6 +460,18 @@ function PushNotificationCard() {
     onError: () => toast('拉取失败, 请确认 token 已保存', 'error'),
   })
 
+  // ── 市场快讯轮询 ───────────
+  const newsPollEnabled = settings?.news_poll_enabled ?? false
+  const newsPollInterval = settings?.news_poll_interval ?? 300
+  const toggleNewsPoll = useMutation({
+    mutationFn: (enabled: boolean) => api.updateNewsPoll(enabled),
+    onSuccess: (data) => {
+      toast(data.news_poll_enabled ? '快讯轮询已开启' : '快讯轮询已关闭', 'success')
+      qc.invalidateQueries({ queryKey: QK.settings })
+    },
+    onError: () => toast('保存失败', 'error'),
+  })
+
   return (
     <Card icon={Webhook} title="推送通知">
       <p className="text-xs text-secondary mb-3">
@@ -644,6 +657,27 @@ function PushNotificationCard() {
               </details>
             </div>
           )}
+        </div>
+
+        {/* 市场快讯轮询 (可用): 后台抓财联社电报入库, 与推送/档位无关 */}
+        <div className="rounded-btn border border-border/60 bg-base/40 overflow-hidden">
+          <div className="flex items-center gap-2 px-2.5 py-2">
+            <input
+              type="checkbox"
+              checked={newsPollEnabled}
+              disabled={toggleNewsPoll.isPending}
+              onChange={e => toggleNewsPoll.mutate(e.target.checked)}
+              title="后台定时抓取财联社电报入库 (供资讯页与 Telegram /news 查询)"
+              className="h-3 w-3 accent-accent cursor-pointer disabled:opacity-50"
+            />
+            <Newspaper className="h-3 w-3 text-accent" />
+            <span className="text-[11px] font-medium text-foreground">市场快讯</span>
+            <span className="text-[9px] text-muted">后台抓取财联社电报 · 每 {newsPollInterval}s</span>
+            {newsPollEnabled && (
+              <span className="rounded bg-accent/15 px-1 py-px text-[9px] text-accent">轮询中</span>
+            )}
+            <span className="ml-auto text-[9px] text-muted">资讯页 · /news</span>
+          </div>
         </div>
 
         {/* 占位渠道 — 不可点 */}
