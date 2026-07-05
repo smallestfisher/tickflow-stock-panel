@@ -696,6 +696,9 @@ export interface SettingsState {
   telegram_token_masked?: string
   telegram_enabled?: boolean
   telegram_allowed_chat_ids?: string[]
+  // 市场快讯轮询
+  news_poll_enabled?: boolean
+  news_poll_interval?: number
 }
 
 /** 保存 TickFlow Key 的响应(先探后存) */
@@ -955,6 +958,11 @@ export const api = {
   discoverTelegramChat: () =>
     request<{ chats: { chat_id: string; label: string }[] }>(
       '/api/settings/telegram/discover-chat',
+    ),
+  updateNewsPoll: (enabled?: boolean, interval?: number) =>
+    request<{ news_poll_enabled: boolean; news_poll_interval: number; news_poll_running: boolean }>(
+      '/api/settings/preferences/news-poll',
+      { method: 'PUT', body: JSON.stringify({ enabled, interval }) },
     ),
 
   updateWebhookDefault: (enabled: boolean) =>

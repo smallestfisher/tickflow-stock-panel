@@ -32,7 +32,6 @@ dependencies = [
     "platformdirs>=4.0",          # 桌面版用户数据目录 (跨平台持久可写)
     "winotify>=1.1; sys_platform == 'win32'",  # Windows 系统通知 (进操作中心)
     "plyer>=2.1",                 # 系统通知跨平台兜底 (macOS/Linux)
-    "pytdx>=1.72",
     "selectolax>=0.3.21",         # 财联社电报 HTML 解析 (lexbor 内核, CSS 选择器)
 ]
 
