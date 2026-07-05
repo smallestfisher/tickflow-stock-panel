@@ -15,6 +15,7 @@ from app.api import analysis, auth as auth_api, backtest, data, ext_data, financ
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
+from app.services.telegram_adapter import TelegramTokenMaskingFilter
 from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
@@ -24,6 +25,8 @@ logging.basicConfig(
     level=settings.log_level,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+for handler in logging.getLogger().handlers:
+    handler.addFilter(TelegramTokenMaskingFilter())
 logger = logging.getLogger(__name__)
 
 

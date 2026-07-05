@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.services.telegram_adapter import (
     is_valid_token_shape,
+    mask_telegram_token,
     split_message,
 )
 from app.services.telegram_commands import normalize_symbol
@@ -56,6 +57,17 @@ def test_invalid_token_shape():
     assert not is_valid_token_shape("no-colon-here")
     assert not is_valid_token_shape("abc:short")  # 冒号前非数字
     assert not is_valid_token_shape("123:tooshort")  # 尾段不足 20
+
+
+def test_mask_telegram_token_redacts_bot_url():
+    raw = (
+        "HTTP Request: GET "
+        "https://api.telegram.org/bot123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/getUpdates"
+    )
+    masked = mask_telegram_token(raw)
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456" not in masked
+    assert "https://api.telegram.org/bot123456789:" in masked
+    assert "***" in masked
 
 
 # ===== normalize_symbol =====

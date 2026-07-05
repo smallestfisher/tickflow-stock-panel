@@ -12,6 +12,8 @@ services:
       - "${PORT:-3018}:3018"
     env_file:
       - .env
+    environment:
+      TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro

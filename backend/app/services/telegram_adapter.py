@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,30 @@ logger = logging.getLogger(__name__)
 _MAX_LEN = 4000
 
 _API_BASE = "https://api.telegram.org"
+_TELEGRAM_BOT_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)(\d+):([^\s/?]+)")
 
 
 def _method_url(token: str, method: str) -> str:
     return f"{_API_BASE}/bot{token}/{method}"
+
+
+def mask_telegram_token(text: str) -> str:
+    """Redact Telegram bot tokens that appear inside Bot API URLs."""
+    if not text:
+        return text
+    return _TELEGRAM_BOT_URL_RE.sub(r"\1\2:***", text)
+
+
+class TelegramTokenMaskingFilter(logging.Filter):
+    """Sanitize Telegram bot tokens before records are formatted."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        masked = mask_telegram_token(message)
+        if masked != message:
+            record.msg = masked
+            record.args = ()
+        return True
 
 
 def is_valid_token_shape(token: str) -> bool:
