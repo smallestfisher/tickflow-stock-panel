@@ -76,6 +76,12 @@ export const QK = {
 
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,
+
+  // 市场资讯
+  newsTelegraph:      (source: string) => ['news-telegraph', source] as const,
+  newsStockReport:    (code: string) => ['news-stock-report', code] as const,
+  newsIndustryReport: (industry: string) => ['news-industry-report', industry] as const,
+  newsStockNotice:    (code: string) => ['news-stock-notice', code] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

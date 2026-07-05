@@ -491,6 +491,36 @@ export interface LimitLadderTier {
   stocks: LimitLadderStock[]
 }
 
+// ===== 市场资讯 (快讯 / 研报 / 公告) =====
+export interface Telegraph {
+  id: number
+  time: string
+  content: string
+  is_red: boolean
+  url: string
+  source: string
+  created_at: string
+  subjects: string[]
+  stocks: string[]
+}
+
+export interface ResearchReport {
+  title: string
+  org: string
+  date: string
+  author: string
+  rating: string
+  url: string
+}
+
+export interface StockNotice {
+  title: string
+  date: string
+  stocks: string[]
+  columns: string[]
+  url: string
+}
+
 export interface LimitLadderResult {
   as_of: string
   tiers: LimitLadderTier[]
@@ -738,6 +768,25 @@ export interface StrategyAlertEvent {
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  // ===== 市场资讯 (快讯 / 研报 / 公告) =====
+  newsTelegraph: (source = '', limit = 50, beforeId?: number) => {
+    const p = new URLSearchParams()
+    if (source) p.set('source', source)
+    p.set('limit', String(limit))
+    if (beforeId != null) p.set('before_id', String(beforeId))
+    return request<{ items: Telegraph[]; count: number }>(`/api/news/telegraph?${p.toString()}`)
+  },
+  newsStockReport: (code: string, days = 90) =>
+    request<{ items: ResearchReport[] }>(`/api/news/report/${encodeURIComponent(code)}?days=${days}`),
+  newsIndustryReport: (industry = '', days = 90) => {
+    const p = new URLSearchParams()
+    if (industry) p.set('industry', industry)
+    p.set('days', String(days))
+    return request<{ items: ResearchReport[] }>(`/api/news/industry-report?${p.toString()}`)
+  },
+  newsStockNotice: (code: string) =>
+    request<{ items: StockNotice[] }>(`/api/news/notice/${encodeURIComponent(code)}`),
 
   // ===== Auth (访问认证) =====
   authStatus: () =>

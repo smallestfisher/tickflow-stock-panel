@@ -599,6 +599,99 @@ async def _cmd_livesearch(ctx: CommandContext, args: str) -> str:  # noqa: ARG00
 
 
 # ================================================================
+# 市场资讯命令 (快讯 / 研报 / 公告)
+# ================================================================
+
+@command("news", "最近市场快讯 (财联社电报)", usage="[条数]",
+         args_hint="可选条数, 如 10; 留空默认 10 条")
+async def _cmd_news(ctx: CommandContext, args: str) -> str:
+    from app.services import news_store
+
+    limit = 10
+    a = (args or "").strip()
+    if a.isdigit():
+        limit = max(1, min(int(a), 30))
+    repo = ctx.repo
+    if repo is None:
+        return "数据尚未就绪。"
+    db = repo.store.data_dir / "news.db"
+    if not db.exists():
+        return "暂无快讯 (轮询未开启或尚未抓到)。可在「设置」开启快讯轮询。"
+    rows = news_store.list_telegraphs(db, limit=limit)
+    if not rows:
+        return "暂无快讯。"
+    lines = ["<b>📰 市场快讯</b>"]
+    for r in rows:
+        flag = "🔴 " if r.get("is_red") else ""
+        t = r.get("time") or ""
+        content = str(r.get("content") or "")
+        lines.append(f"\n{flag}<b>{t}</b>  {content}")
+        subs = r.get("subjects") or []
+        if subs:
+            lines.append(f"  🏷 {' · '.join(subs)}")
+    return "\n".join(lines)
+
+
+@command("report", "个股研报 (最近 90 天)", usage="<代码>",
+         args_hint="股票代码或名字, 如 600519")
+async def _cmd_report(ctx: CommandContext, args: str) -> str:  # noqa: ARG001
+    from app.services import news_source
+
+    code = normalize_symbol((args or "").strip())
+    if not code:
+        return "用法: /report &lt;代码&gt;, 如 /report 600519"
+    items = news_source.fetch_stock_report(code)
+    if not items:
+        return f"未查到 {code} 的研报 (或近 90 天无)。"
+    lines = [f"<b>📑 {code} 个股研报</b>"]
+    for it in items[:10]:
+        rating = f"[{it['rating']}] " if it.get("rating") else ""
+        lines.append(f"\n{rating}<b>{it.get('title', '')}</b>")
+        meta = " · ".join(x for x in [it.get("org", ""), it.get("date", "")] if x)
+        if meta:
+            lines.append(f"  {meta}")
+    return "\n".join(lines)
+
+
+@command("ireport", "行业研报 (最近 90 天)", usage="[行业代码]",
+         args_hint="行业代码, 留空=全行业")
+async def _cmd_ireport(ctx: CommandContext, args: str) -> str:  # noqa: ARG001
+    from app.services import news_source
+
+    industry = (args or "").strip()
+    items = news_source.fetch_industry_report(industry)
+    if not items:
+        return "未查到行业研报 (或近 90 天无)。"
+    lines = ["<b>📊 行业研报</b>"]
+    for it in items[:10]:
+        lines.append(f"\n<b>{it.get('title', '')}</b>")
+        meta = " · ".join(x for x in [it.get("org", ""), it.get("date", "")] if x)
+        if meta:
+            lines.append(f"  {meta}")
+    return "\n".join(lines)
+
+
+@command("notice", "个股公告", usage="<代码>",
+         args_hint="股票代码或名字, 如 600519")
+async def _cmd_notice(ctx: CommandContext, args: str) -> str:  # noqa: ARG001
+    from app.services import news_source
+
+    code = normalize_symbol((args or "").strip())
+    if not code:
+        return "用法: /notice &lt;代码&gt;, 如 /notice 600519"
+    items = news_source.fetch_stock_notice(code)
+    if not items:
+        return f"未查到 {code} 的公告。"
+    lines = [f"<b>📢 {code} 公告</b>"]
+    for it in items[:10]:
+        cols = f"[{' '.join(it['columns'])}] " if it.get("columns") else ""
+        lines.append(f"\n{cols}<b>{it.get('title', '')}</b>")
+        if it.get("date"):
+            lines.append(f"  {it['date']}")
+    return "\n".join(lines)
+
+
+# ================================================================
 # 结构化命令分发
 # ================================================================
 

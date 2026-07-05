@@ -84,6 +84,9 @@ def get_settings() -> dict:
         "telegram_token_masked": secrets_store.mask(secrets_store.get_telegram_token()),
         "telegram_enabled": preferences.get_telegram_enabled(),
         "telegram_allowed_chat_ids": preferences.get_telegram_allowed_chat_ids(),
+        # 市场快讯轮询 (开关 / 间隔)
+        "news_poll_enabled": preferences.get_news_poll_enabled(),
+        "news_poll_interval": preferences.get_news_poll_interval(),
     }
 
 
@@ -764,6 +767,37 @@ def discover_telegram_chat() -> dict:
         label = chat.get("username") or chat.get("first_name") or chat.get("title") or ""
         chats[str(cid)] = label
     return {"chats": [{"chat_id": k, "label": v} for k, v in chats.items()]}
+
+
+# ===== 市场快讯轮询 =====
+
+class NewsPollPrefsIn(BaseModel):
+    enabled: bool | None = None
+    interval: float | None = None
+
+
+@router.put("/preferences/news-poll")
+def update_news_poll(req: NewsPollPrefsIn, request: Request) -> dict:
+    """快讯轮询开关/间隔, 改动后重启轮询线程使即时生效。"""
+    from app.services import preferences
+
+    if req.enabled is not None:
+        preferences.set_news_poll_enabled(req.enabled)
+    if req.interval is not None:
+        preferences.set_news_poll_interval(req.interval)
+
+    poller = getattr(request.app.state, "news_poller", None)
+    running = False
+    if poller is not None:
+        try:
+            running = poller.restart()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("news poller restart failed: %s", e)
+    return {
+        "news_poll_enabled": preferences.get_news_poll_enabled(),
+        "news_poll_interval": preferences.get_news_poll_interval(),
+        "news_poll_running": running,
+    }
 
 
 class WebhookEnabledDefaultIn(BaseModel):
