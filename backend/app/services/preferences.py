@@ -503,6 +503,39 @@ def set_telegram_allowed_chat_ids(chat_ids: list[str]) -> list[str]:
     return cleaned
 
 
+# ===== 市场快讯轮询 =====
+# 独立 daemon 线程持续抓财联社电报入库。默认关闭 (需用户显式开启)。
+
+_NEWS_POLL_MIN_INTERVAL = 60.0
+_NEWS_POLL_MAX_INTERVAL = 3600.0
+
+
+def get_news_poll_enabled() -> bool:
+    """快讯轮询总开关。默认关闭。"""
+    return bool(load().get("news_poll_enabled", False))
+
+
+def set_news_poll_enabled(enabled: bool) -> bool:
+    save({"news_poll_enabled": bool(enabled)})
+    return bool(enabled)
+
+
+def get_news_poll_interval() -> float:
+    """快讯抓取间隔 (秒)。默认 300, 夹在 [60, 3600]。"""
+    raw = load().get("news_poll_interval", 300.0)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 300.0
+    return max(_NEWS_POLL_MIN_INTERVAL, min(v, _NEWS_POLL_MAX_INTERVAL))
+
+
+def set_news_poll_interval(interval: float) -> float:
+    v = max(_NEWS_POLL_MIN_INTERVAL, min(float(interval), _NEWS_POLL_MAX_INTERVAL))
+    save({"news_poll_interval": v})
+    return v
+
+
 def get_webhook_enabled_default() -> bool:
     """新建监控规则时是否默认勾选「飞书推送」。
 
